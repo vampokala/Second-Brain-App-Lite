@@ -11,17 +11,17 @@ Local-first desktop companion for turning Markdown in **`raw/`** into a structur
 - [How ingest works](#how-ingest-works)
 - [How chat works](#how-chat-works)
 - [Vault vs app data](#vault-vs-app-data)
-- [Who it’s for](#who-its-for)
+- [Who it's for](#who-its-for)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
 - [Configuration reference](#configuration-reference-technical)
 - [Environment variables](#environment-variable-overrides)
-- [Secrets and threat model](#secrets--threat-model)
-- [API keys and providers](#api-keys--providers)
+- [Secrets and threat model](#secrets-and-threat-model)
+- [API keys and providers](#api-keys-and-providers)
 - [Building from source](#building-from-source)
 - [Publishing to GitHub](#publishing-to-github)
 - [Troubleshooting](#troubleshooting)
-- [Contributing / license](#contributing--license)
+- [Contributing and license](#contributing-and-license)
 
 ---
 
@@ -173,7 +173,7 @@ Paths **`raw/`**, **`wiki/`**, and **schema** are configurable (folder picker + 
 
 ---
 
-## Who it’s for
+## Who it's for
 
 - Obsidian / Markdown vault users who want LLM-assisted **wiki ingest + query**.
 - Developers running **local Ollama** or **cloud models** who prefer filesystem-backed KBs over Postgres/RAG stacks.
@@ -190,7 +190,7 @@ Paths **`raw/`**, **`wiki/`**, and **schema** are configurable (folder picker + 
 
 ---
 
-## Quick start (guided)
+## Quick start
 
 1. Clone the repo (after you [publish to GitHub](#publishing-to-github) or from your fork):
 
@@ -278,7 +278,7 @@ See [`.env.example`](./.env.example).
 
 ---
 
-## Secrets & threat model
+## Secrets and threat model
 
 - Keys typed into the UI are saved via the **`keyring`** crate (**macOS Keychain**, **Windows Credential Manager**, **Linux Secret Service** where available).
 - The UI never reloads full plaintext secrets — only masked hints (“stored…”).
@@ -288,7 +288,7 @@ This protects keys from casual disk scans and accidental commits — **not** fro
 
 ---
 
-## API keys & providers
+## API keys and providers
 
 | Provider | Notes |
 |----------|-------|
@@ -388,6 +388,6 @@ gh repo create second-brain-lite --private --source=. --remote=origin --push
 
 ---
 
-## Contributing / license
+## Contributing and license
 
 Issues and PRs welcome. Licensed under **MIT** — see [`LICENSE`](./LICENSE).
