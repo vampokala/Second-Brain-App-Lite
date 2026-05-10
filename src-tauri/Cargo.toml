@@ -1,0 +1,38 @@
+[package]
+name = "second-brain-lite"
+version = "0.1.0"
+description = "Second Brain Lite — local wiki ingest and chat"
+authors = ["you"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.1", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+anyhow = "1.0"
+thiserror = "2.0"
+dirs = "6.0"
+walkdir = "2"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+regex = "1"
+keyring = "3"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
+serde_yaml = "0.9"

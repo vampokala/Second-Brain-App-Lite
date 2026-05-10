@@ -1,0 +1,35 @@
+# Dependencies & builds
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+
+# Environment & secrets (never commit real keys)
+.env
+.env.*
+!.env.example
+
+# Logs & debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Vite
+.vite/
+
+# OS & editors
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+*~
+
+# TypeScript / tooling
+*.tsbuildinfo
+
+# Test / coverage (if added later)
+coverage/
