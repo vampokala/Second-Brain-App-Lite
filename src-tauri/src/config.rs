@@ -18,7 +18,7 @@ pub struct AppConfig {
     pub schema_dir: Option<String>,
     #[serde(default)]
     pub vault_root: Option<String>,
-    /// openai | anthropic | ollama | compatible
+    /// openai | anthropic | ollama | compatible | gemini
     #[serde(default = "default_provider")]
     pub default_provider: String,
     #[serde(default)]
@@ -35,12 +35,27 @@ pub struct AppConfig {
     pub compatible_base_url: String,
     #[serde(default)]
     pub compatible_model: String,
+    #[serde(default = "default_gemini_base_url")]
+    pub gemini_base_url: String,
+    #[serde(default = "default_gemini_model")]
+    pub gemini_model: String,
     #[serde(default)]
     pub theme: String,
 }
 
 fn default_provider() -> String {
     "ollama".into()
+}
+
+/// Trim, lowercase, and map common aliases so chat/ingest match LLM routing (`llm.rs`).
+pub fn normalize_llm_provider(raw: &str) -> String {
+    let p = raw.trim().to_lowercase();
+    match p.as_str() {
+        "" => default_provider(),
+        "claude" => "anthropic".into(),
+        "google" => "gemini".into(),
+        other => other.into(),
+    }
 }
 
 fn default_ollama_url() -> String {
@@ -55,6 +70,15 @@ fn default_openai_model() -> String {
 fn default_anthropic_model() -> String {
     // Claude Sonnet 4.6: current balanced API model (Anthropic docs; 3.x aliases retired).
     "claude-sonnet-4-6".into()
+}
+
+fn default_gemini_base_url() -> String {
+    "https://generativelanguage.googleapis.com/v1beta".into()
+}
+
+fn default_gemini_model() -> String {
+    // Align with sibling app defaults (Gemini API generateContent model id).
+    "gemini-3.1-flash-lite".into()
 }
 
 impl Default for AppConfig {
@@ -73,6 +97,8 @@ impl Default for AppConfig {
             anthropic_model: default_anthropic_model(),
             compatible_base_url: String::new(),
             compatible_model: String::new(),
+            gemini_base_url: default_gemini_base_url(),
+            gemini_model: default_gemini_model(),
             theme: "system".into(),
         }
     }

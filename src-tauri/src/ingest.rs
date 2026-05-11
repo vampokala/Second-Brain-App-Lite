@@ -1,7 +1,7 @@
-//! Lite ingest: new/changed markdown under raw → wiki/sources + index + log.
+//! Lite ingest: new/changed documents under raw → wiki/sources + index + log.
 
 use crate::atomic;
-use crate::config::{resolved_triple, AppConfig};
+use crate::config::{normalize_llm_provider, resolved_triple, AppConfig};
 use crate::llm::{complete_chat, LlmMessage};
 use crate::manifest::{sha256_bytes, ManifestEntry};
 use crate::wiki;
@@ -250,6 +250,67 @@ fn maybe_patch_glossary(wiki_dir: &Path, patch: Option<&str>) -> Result<()> {
     atomic::atomic_write(&gp, body.as_bytes())
 }
 
+/// Maximum UTF-8 size for a single pasted ingest payload.
+const MAX_PASTE_BYTES: usize = 512 * 1024;
+
+fn slugify_paste_stem(input: &str) -> String {
+    input
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .fold(String::new(), |mut acc, c| {
+            if acc.ends_with('-') && c == '-' {
+                acc
+            } else {
+                acc.push(c);
+                acc
+            }
+        })
+}
+
+/// Writes UTF-8 markdown under `raw/pastes/`. Returns path relative to `raw/` (e.g. `pastes/note.md`).
+pub fn save_paste_to_raw(cfg: &AppConfig, content: &str, stem_opt: Option<&str>) -> Result<String> {
+    if content.len() > MAX_PASTE_BYTES {
+        anyhow::bail!("paste exceeds {} KiB", MAX_PASTE_BYTES / 1024);
+    }
+    let (raw_dir, _, _) = resolved_triple(cfg)?;
+    let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
+    let paste_dir = raw_dir.join("pastes");
+    std::fs::create_dir_all(&paste_dir).context("create raw/pastes")?;
+
+    let mut stem = stem_opt
+        .map(slugify_paste_stem)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("paste-{}", Utc::now().format("%Y%m%d-%H%M%S")));
+
+    stem = stem.chars().take(120).collect::<String>().trim_matches('-').to_string();
+    if stem.is_empty() {
+        stem = format!("paste-{}", Utc::now().format("%Y%m%d-%H%M%S"));
+    }
+
+    let stem_base = stem.clone();
+    let mut candidate = stem_base.clone();
+    let mut path = paste_dir.join(format!("{candidate}.md"));
+    let mut n = 2u32;
+    while path.exists() {
+        candidate = format!("{stem_base}-{n}");
+        path = paste_dir.join(format!("{candidate}.md"));
+        n += 1;
+        if n > 10_000 {
+            anyhow::bail!("could not pick a unique paste filename");
+        }
+    }
+
+    let rel = format!("pastes/{candidate}.md");
+    atomic::atomic_write(&path, content.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(rel)
+}
+
 pub async fn run_ingest<F>(cfg: &AppConfig, full_tier: bool, mut on_progress: F) -> Result<Vec<FileIngestResult>>
 where
     F: FnMut(IngestProgressPayload) + Send,
@@ -263,7 +324,7 @@ where
 
     on_progress(IngestProgressPayload {
         phase: "prepare".into(),
-        message: "Loading schema excerpts; scanning raw/ for markdown…".into(),
+        message: "Loading schema excerpts; scanning raw/ for documents…".into(),
         current: None,
         total: None,
         relative_path: None,
@@ -274,33 +335,37 @@ where
     let index_excerpt = wiki::read_optional(&wiki_dir.join("index.md"), 12_000);
     let glossary_excerpt = wiki::read_optional(&wiki_dir.join("glossary.md"), 8000);
 
-    let provider = cfg.default_provider.as_str();
+    let provider = normalize_llm_provider(&cfg.default_provider);
     let mut manifest = crate::manifest::load_manifest()?;
     let mut results = vec![];
 
-    let mut md_paths: Vec<PathBuf> = Vec::new();
+    let mut raw_paths: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(&raw_dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        if !crate::extract::is_supported_raw_file(path) {
             continue;
         }
-        md_paths.push(path.to_path_buf());
+        raw_paths.push(path.to_path_buf());
     }
-    md_paths.sort();
-    let total_n = md_paths.len() as u32;
+    raw_paths.sort();
+    let total_n = raw_paths.len() as u32;
 
     on_progress(IngestProgressPayload {
         phase: "start".into(),
-        message: format!("Found {} markdown file(s) under raw/", total_n),
+        message: format!(
+            "Found {} supported file(s) under raw/ ({})",
+            total_n,
+            crate::extract::SUPPORTED_EXTENSIONS.join(", ")
+        ),
         current: None,
         total: Some(total_n),
         relative_path: None,
     });
 
-    for (idx, path) in md_paths.iter().enumerate() {
+    for (idx, path) in raw_paths.iter().enumerate() {
         let current_i = (idx + 1) as u32;
         let rel = path
             .strip_prefix(&raw_dir)
@@ -355,7 +420,42 @@ where
             }
         }
 
-        let text = String::from_utf8_lossy(&bytes).to_string();
+        let text = match crate::extract::extract_plain_text(path, &bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                let detail = format!("extract text: {}", e);
+                on_progress(IngestProgressPayload {
+                    phase: "error".into(),
+                    message: detail.clone(),
+                    current: Some(current_i),
+                    total: Some(total_n),
+                    relative_path: Some(rel.clone()),
+                });
+                results.push(FileIngestResult {
+                    relative_raw_path: rel.clone(),
+                    status: "error".into(),
+                    detail: Some(detail),
+                });
+                continue;
+            }
+        };
+        if text.trim().is_empty() {
+            let detail =
+                "extracted text is empty (file may be scanned PDF, encrypted, or blank)".to_string();
+            on_progress(IngestProgressPayload {
+                phase: "error".into(),
+                message: detail.clone(),
+                current: Some(current_i),
+                total: Some(total_n),
+                relative_path: Some(rel.clone()),
+            });
+            results.push(FileIngestResult {
+                relative_raw_path: rel.clone(),
+                status: "error".into(),
+                detail: Some(detail),
+            });
+            continue;
+        }
         let fallback_slug = kebab_slug(path);
 
         let tier_hint = if full_tier {
@@ -371,7 +471,7 @@ where
         );
 
         let user = format!(
-            "### CLAUDE.md (schema)\n{}\n\n### llm-wiki.md (pattern)\n{}\n\n### index excerpt\n{}\n\n### glossary excerpt\n{}\n\n### Raw path\nraw/{}\n\n### Raw content\n{}",
+            "### CLAUDE.md (schema)\n{}\n\n### llm-wiki.md (pattern)\n{}\n\n### index excerpt\n{}\n\n### glossary excerpt\n{}\n\n### Raw path\nraw/{}\n\n(Plain text only for ingest: PDF/Word/HTML are extracted locally; Markdown files pass through as-is.)\n\n### Raw content\n{}",
             claude,
             llm_wiki,
             index_excerpt,
@@ -399,7 +499,7 @@ where
             relative_path: Some(rel.clone()),
         });
 
-        let parsed = match complete_chat(provider, cfg, &messages).await {
+        let parsed = match complete_chat(&provider, cfg, &messages).await {
             Ok(raw) => match parse_ingest_json(&raw) {
                 Ok(p) => p,
                 Err(e) => {

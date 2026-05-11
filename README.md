@@ -216,7 +216,7 @@ Paths **`raw/`**, **`wiki/`**, and **schema** are configurable (folder picker + 
    - Click **Choose folder…** and pick where your vault should live.
    - Click **Setup** — creates **`raw/`** and **`wiki/`** under that folder and saves paths.
    - Click **Copy template schemas** if `CLAUDE.md` / `llm-wiki.md` are missing (bundled templates ship in this repo).
-   - Pick provider (**Ollama**, OpenAI, Anthropic, or OpenAI-compatible), enter models, **Save API keys** (stored in the OS keychain where supported).
+   - Pick provider (**Ollama**, OpenAI, Anthropic, Google Gemini, or OpenAI-compatible), enter models, **Save API keys** (stored in the OS keychain where supported).
    - Click **Save configuration**.
 
 5. Put Markdown sources under **`raw/`**, open **Ingest**, run **Run ingest**.
@@ -234,7 +234,7 @@ Paths **`raw/`**, **`wiki/`**, and **schema** are configurable (folder picker + 
 | `raw/` path | Advanced overrides | `rawDir` |
 | `wiki/` path | Advanced overrides | `wikiDir` |
 | Schema dir (`CLAUDE.md`, `llm-wiki.md`) | Usually vault root | `schemaDir` |
-| Models / provider | Configuration tab | `defaultProvider`, `ollamaBaseUrl`, `openaiModel`, … |
+| Models / provider | Configuration tab | `defaultProvider`, `ollamaBaseUrl`, `openaiModel`, `geminiModel`, … |
 
 App data directory (from Rust [`dirs::data_local_dir()`](https://docs.rs/dirs/latest/dirs/fn.data_local_dir.html) + `SecondBrainLite/`):
 
@@ -272,6 +272,7 @@ Vars override GUI-backed paths when the app reads config:
 | `SECOND_BRAIN_SCHEMA_DIR` | Explicit schema directory |
 | `OPENAI_API_KEY` | Overrides saved OpenAI key |
 | `ANTHROPIC_API_KEY` | Overrides saved Anthropic key |
+| `GEMINI_API_KEY` | Overrides saved Gemini key |
 | `COMPATIBLE_API_KEY` | Overrides saved compatible-provider key |
 
 See [`.env.example`](./.env.example).
@@ -286,6 +287,16 @@ See [`.env.example`](./.env.example).
 
 This protects keys from casual disk scans and accidental commits — **not** from malware running as your user.
 
+### macOS: system dialog rejects your password
+
+That prompt is from **Keychain Access**, not from Second Brain Lite’s API-key fields. It normally expects your **Mac user password**. If a correct password is **still rejected**, the **login keychain** password often no longer matches your account password (common after some macOS upgrades or account changes).
+
+1. Open **Keychain Access** (Spotlight).
+2. Select the **login** keychain in the sidebar (sometimes shown as your username).
+3. Use **File → Change Password for Keychain “login”…** to set it to your current login password, or follow Apple’s support article for repairing / resetting a damaged **login** keychain (resetting can remove stored passwords — back up first).
+
+**Bypass Keychain entirely:** set the key as an environment variable for that provider (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or `COMPATIBLE_API_KEY`), then **launch the app from a shell where those vars are set** (for example Terminal: `export OPENAI_API_KEY='…'; npm run tauri:dev`). The app reads env vars before Keychain.
+
 ---
 
 ## API keys and providers
@@ -295,6 +306,7 @@ This protects keys from casual disk scans and accidental commits — **not** fro
 | **Ollama** | Default `http://127.0.0.1:11434`. No API key. |
 | **OpenAI** | Chat Completions JSON + SSE streaming. |
 | **Anthropic** | Messages API (non-streaming fallback assembled into one reply). |
+| **Gemini** | Google AI `generateContent` (`GEMINI_API_KEY` query param); default base `generativelanguage.googleapis.com/v1beta`. |
 | **Compatible** | Any OpenAI-compatible `/v1/chat/completions` base URL + Bearer key. |
 
 Costs and rate limits depend on your chosen vendor — monitor usage on their dashboards.

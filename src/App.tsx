@@ -15,6 +15,8 @@ type AppConfig = {
   ollamaModel: string
   openaiModel: string
   anthropicModel: string
+  geminiBaseUrl: string
+  geminiModel: string
   compatibleBaseUrl: string
   compatibleModel: string
   theme: string
@@ -53,6 +55,66 @@ type SchemaStatus = {
   llmWikiMd: boolean
 }
 
+/** Removes streaming error sentinel so clipboard gets the readable error text. */
+function chatClipboardText(raw: string): string {
+  const marker = '__ERROR__'
+  const i = raw.indexOf(marker)
+  if (i >= 0) return raw.slice(i + marker.length).trim()
+  return raw
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+function CopyIconButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  const disabled = !text.trim().length
+  return (
+    <button
+      type="button"
+      className="icon-copy-btn"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={async () => {
+        if (disabled) return
+        const ok = await copyToClipboard(text)
+        if (ok) {
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1600)
+        }
+      }}
+    >
+      {copied ? (
+        <span aria-hidden="true">✓</span>
+      ) : (
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
 async function loadCfg(): Promise<AppConfig> {
   return invoke<AppConfig>('load_app_config')
 }
@@ -70,6 +132,7 @@ export default function App() {
 
   const [openaiSecretInput, setOpenaiSecretInput] = useState('')
   const [anthropicSecretInput, setAnthropicSecretInput] = useState('')
+  const [geminiSecretInput, setGeminiSecretInput] = useState('')
   const [compatibleSecretInput, setCompatibleSecretInput] = useState('')
   const [hints, setHints] = useState<Record<string, string | undefined>>({})
 
@@ -77,6 +140,8 @@ export default function App() {
   const [ingestBusy, setIngestBusy] = useState(false)
   const [ingestRows, setIngestRows] = useState<FileIngestResult[]>([])
   const [ingestLogLines, setIngestLogLines] = useState<string[]>([])
+  const [pasteTitle, setPasteTitle] = useState('')
+  const [pasteBody, setPasteBody] = useState('')
 
   const [sessions, setSessions] = useState<SessionFile[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -87,12 +152,18 @@ export default function App() {
 
   const refreshHints = useCallback(async () => {
     try {
-      const [o, a, c] = await Promise.all([
+      const [o, a, g, c] = await Promise.all([
         invoke<string | null>('api_secret_hint', { provider: 'openai' }),
         invoke<string | null>('api_secret_hint', { provider: 'anthropic' }),
+        invoke<string | null>('api_secret_hint', { provider: 'gemini' }),
         invoke<string | null>('api_secret_hint', { provider: 'compatible' }),
       ])
-      setHints({ openai: o ?? undefined, anthropic: a ?? undefined, compatible: c ?? undefined })
+      setHints({
+        openai: o ?? undefined,
+        anthropic: a ?? undefined,
+        gemini: g ?? undefined,
+        compatible: c ?? undefined,
+      })
     } catch {
       /* ignore */
     }
@@ -179,13 +250,14 @@ export default function App() {
     }
   }
 
-  const saveSecret = async (provider: 'openai' | 'anthropic' | 'compatible', secret: string) => {
+  const saveSecret = async (provider: 'openai' | 'anthropic' | 'gemini' | 'compatible', secret: string) => {
     if (!secret.trim()) return
     try {
       await invoke('save_api_secret', { provider, secret: secret.trim() })
       setBanner({ kind: 'success', text: `${provider} key saved to OS keychain.` })
       if (provider === 'openai') setOpenaiSecretInput('')
       if (provider === 'anthropic') setAnthropicSecretInput('')
+      if (provider === 'gemini') setGeminiSecretInput('')
       if (provider === 'compatible') setCompatibleSecretInput('')
       refreshHints()
     } catch (e) {
@@ -211,16 +283,20 @@ export default function App() {
     }
   }
 
+  const subscribeIngestProgress = async () => {
+    return listen<IngestProgressPayload>('ingest-progress', (ev) => {
+      const line = formatIngestProgressLine(ev.payload)
+      setIngestLogLines((prev) => [...prev, line])
+    })
+  }
+
   const runIngest = async () => {
     if (!cfg) return
     setIngestBusy(true)
     setIngestRows([])
     setIngestLogLines([])
     setBanner(null)
-    const unlisten = await listen<IngestProgressPayload>('ingest-progress', (ev) => {
-      const line = formatIngestProgressLine(ev.payload)
-      setIngestLogLines((prev) => [...prev, line])
-    })
+    const unlisten = await subscribeIngestProgress()
     try {
       const rows = await invoke<FileIngestResult[]>('run_ingest_cmd', {
         cfg,
@@ -235,6 +311,49 @@ export default function App() {
         })
       } else {
         setBanner({ kind: 'success', text: `Ingest finished (${rows.length} files scanned).` })
+      }
+    } catch (e) {
+      setBanner({ kind: 'error', text: String(e) })
+    } finally {
+      unlisten()
+      setIngestBusy(false)
+    }
+  }
+
+  const pasteAndIngest = async () => {
+    if (!cfg) return
+    const body = pasteBody.trim()
+    if (!body) {
+      setBanner({ kind: 'error', text: 'Enter or paste some text to ingest.' })
+      return
+    }
+    setIngestBusy(true)
+    setIngestRows([])
+    setIngestLogLines([])
+    setBanner(null)
+    const unlisten = await subscribeIngestProgress()
+    try {
+      const rows = await invoke<FileIngestResult[]>('ingest_pasted_text_cmd', {
+        cfg,
+        fullTier,
+        payload: {
+          content: pasteBody,
+          fileStem: pasteTitle.trim() ? pasteTitle.trim() : undefined,
+        },
+      })
+      setIngestRows(rows)
+      const errCount = rows.filter((r) => r.status === 'error').length
+      if (errCount > 0) {
+        setBanner({
+          kind: 'error',
+          text: `Ingest finished with ${errCount} error(s); see the table for details.`,
+        })
+      } else {
+        setPasteBody('')
+        setBanner({
+          kind: 'success',
+          text: `Saved under raw/pastes/ and ingested (${rows.length} files scanned).`,
+        })
       }
     } catch (e) {
       setBanner({ kind: 'error', text: String(e) })
@@ -369,10 +488,15 @@ export default function App() {
 
       {banner ? (
         <div className={`banner ${banner.kind}`} role="status">
-          {banner.text}
-          <button type="button" className="btn secondary" style={{ float: 'right', padding: '0.2rem 0.5rem' }} onClick={() => setBanner(null)}>
-            Dismiss
-          </button>
+          <div className="banner-row">
+            <span className="banner-text">{banner.text}</span>
+            <div className="banner-actions">
+              {banner.kind === 'error' ? <CopyIconButton text={banner.text} label="Copy error" /> : null}
+              <button type="button" className="btn secondary" style={{ padding: '0.2rem 0.5rem' }} onClick={() => setBanner(null)}>
+                Dismiss
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -449,6 +573,7 @@ export default function App() {
                   <option value="ollama">Ollama (local)</option>
                   <option value="openai">OpenAI</option>
                   <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Google Gemini</option>
                   <option value="compatible">OpenAI-compatible API</option>
                 </select>
               </label>
@@ -475,6 +600,9 @@ export default function App() {
               <label className="field">
                 <span className="label-text">OpenAI model</span>
                 <input type="text" value={cfg.openaiModel} onChange={(e) => patchCfg({ openaiModel: e.target.value })} />
+                <span className="hint">
+                  Stable ids such as gpt-5.4-mini or gpt-4o; legacy names like gpt-4o-latest / *-latest pointers are normalized automatically.
+                </span>
               </label>
               <label className="field">
                 <span className="label-text">OpenAI API key</span>
@@ -490,6 +618,7 @@ export default function App() {
               <label className="field">
                 <span className="label-text">Anthropic model</span>
                 <input type="text" value={cfg.anthropicModel} onChange={(e) => patchCfg({ anthropicModel: e.target.value })} />
+                <span className="hint">Use API ids such as claude-sonnet-4-6 or claude-haiku-4-5 (legacy names like claude-3-5-haiku-latest are mapped automatically).</span>
               </label>
               <label className="field">
                 <span className="label-text">Anthropic API key</span>
@@ -503,12 +632,46 @@ export default function App() {
               </label>
 
               <label className="field">
+                <span className="label-text">Gemini API base URL</span>
+                <input
+                  type="text"
+                  value={cfg.geminiBaseUrl ?? ''}
+                  onChange={(e) => patchCfg({ geminiBaseUrl: e.target.value })}
+                  placeholder="https://generativelanguage.googleapis.com/v1beta"
+                />
+              </label>
+              <label className="field">
+                <span className="label-text">Gemini model id</span>
+                <input type="text" value={cfg.geminiModel ?? ''} onChange={(e) => patchCfg({ geminiModel: e.target.value })} />
+                <span className="hint">
+                  Examples: gemini-3.1-flash-lite, gemini-3.1-pro-preview. Older ids like gemini-2.0-flash-latest map automatically.
+                </span>
+              </label>
+              <label className="field">
+                <span className="label-text">Gemini API key</span>
+                <div className="row">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={geminiSecretInput}
+                    onChange={(e) => setGeminiSecretInput(e.target.value)}
+                    placeholder={hints.gemini ?? 'Not saved'}
+                  />
+                  <button type="button" className="btn secondary" onClick={() => saveSecret('gemini', geminiSecretInput)}>
+                    Save key
+                  </button>
+                </div>
+                {hints.gemini ? <span className="hint">Stored: {hints.gemini}</span> : null}
+              </label>
+
+              <label className="field">
                 <span className="label-text">Compatible — base URL</span>
                 <input type="text" value={cfg.compatibleBaseUrl} onChange={(e) => patchCfg({ compatibleBaseUrl: e.target.value })} placeholder="https://…/v1" />
               </label>
               <label className="field">
                 <span className="label-text">Compatible — model id</span>
                 <input type="text" value={cfg.compatibleModel} onChange={(e) => patchCfg({ compatibleModel: e.target.value })} />
+                <span className="hint">OpenAI-style Chat Completions model names; *-latest aliases are normalized like OpenAI above.</span>
               </label>
               <label className="field">
                 <span className="label-text">Compatible API key</span>
@@ -534,7 +697,8 @@ export default function App() {
       {tab === 'ingest' ? (
         <section className="tab-panel">
           <p>
-            Scans <strong>raw/</strong> for <code>.md</code> files, hashes them, and runs lite ingest into <strong>wiki/sources/</strong> using{' '}
+            Scans <strong>raw/</strong> for{' '}
+            <code>.md</code>, <code>.txt</code>, <code>.pdf</code>, <code>.docx</code>, <code>.html</code> / <code>.htm</code>, hashes them, and runs lite ingest into <strong>wiki/sources/</strong> using{' '}
             <strong>CLAUDE.md</strong> + <strong>llm-wiki.md</strong>. Each successful ingest appends a dated entry to <strong>wiki/log.md</strong> in your vault (open it in Obsidian or any editor).
           </p>
           <label className="field">
@@ -549,9 +713,49 @@ export default function App() {
             <span className="hint">Provider: {cfg.defaultProvider}</span>
           </div>
 
+          <div className="ingest-paste-section">
+            <h3 className="ingest-paste-heading">Paste text</h3>
+            <p className="hint">
+              Saves as <code>raw/pastes/&lt;name&gt;.md</code>, then runs the same ingest as above (model summarizes into{' '}
+              <code>wiki/sources/</code>).
+            </p>
+            <label className="field">
+              <span className="label-text">Filename (optional)</span>
+              <input
+                type="text"
+                value={pasteTitle}
+                onChange={(e) => setPasteTitle(e.target.value)}
+                placeholder="e.g. meeting-notes — becomes pastes/meeting-notes.md"
+                disabled={ingestBusy}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span className="label-text">Content</span>
+              <textarea
+                className="ingest-paste-textarea"
+                value={pasteBody}
+                onChange={(e) => setPasteBody(e.target.value)}
+                placeholder="Paste notes, article text, transcript…"
+                disabled={ingestBusy}
+                rows={12}
+              />
+            </label>
+            <div className="row">
+              <button type="button" className="btn secondary" disabled={ingestBusy} onClick={() => pasteAndIngest()}>
+                {ingestBusy ? 'Working…' : 'Save to raw & ingest'}
+              </button>
+            </div>
+          </div>
+
           {ingestBusy || ingestLogLines.length ? (
             <div className="ingest-progress">
-              <div className="ingest-progress-title">Progress</div>
+              <div className="ingest-progress-title">
+                <span>Progress</span>
+                {ingestLogLines.length ? (
+                  <CopyIconButton text={ingestLogLines.join('\n')} label="Copy progress log" />
+                ) : null}
+              </div>
               <pre className="ingest-progress-pre">
                 {ingestLogLines.length ? ingestLogLines.join('\n') : 'Starting…'}
               </pre>
@@ -565,6 +769,9 @@ export default function App() {
                   <th>Raw file</th>
                   <th>Status</th>
                   <th>Detail</th>
+                  <th className="ingest-copy-cell" aria-label="Copy error">
+                    Copy
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -573,6 +780,14 @@ export default function App() {
                     <td><code>{r.relativeRawPath}</code></td>
                     <td className={r.status === 'ok' ? 'status-ok' : r.status === 'skipped' ? 'status-skip' : 'status-err'}>{r.status}</td>
                     <td>{r.detail ?? ''}</td>
+                    <td className="ingest-copy-cell">
+                      {r.status === 'error' ? (
+                        <CopyIconButton
+                          text={[r.relativeRawPath, r.status, r.detail ?? ''].filter(Boolean).join('\n')}
+                          label="Copy ingest error"
+                        />
+                      ) : null}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -607,7 +822,10 @@ export default function App() {
               <div className="messages">
                 {activeSession?.messages.map((m, i) => (
                   <div key={`${m.ts ?? ''}-${i}`} className={`msg ${m.role}`}>
-                    <div className="role">{m.role}</div>
+                    <div className="msg-head">
+                      <div className="role">{m.role}</div>
+                      <CopyIconButton text={m.content} label={`Copy ${m.role} message`} />
+                    </div>
                     <div className="body">
                       {m.role === 'assistant' ? <ReactMarkdown>{m.content}</ReactMarkdown> : m.content}
                     </div>
@@ -615,7 +833,10 @@ export default function App() {
                 ))}
                 {streamTail ? (
                   <div className="msg assistant">
-                    <div className="role">assistant (streaming)</div>
+                    <div className="msg-head">
+                      <div className="role">assistant (streaming)</div>
+                      <CopyIconButton text={chatClipboardText(streamTail)} label="Copy assistant reply" />
+                    </div>
                     <div className="body">
                       <ReactMarkdown>{streamTail}</ReactMarkdown>
                     </div>

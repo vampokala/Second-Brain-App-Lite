@@ -1,6 +1,6 @@
 //! Chat context pack + persistence helpers.
 
-use crate::config::{resolved_triple, AppConfig};
+use crate::config::{normalize_llm_provider, resolved_triple, AppConfig};
 use crate::llm::{stream_chat, LlmMessage};
 use crate::paths::user_data_dir;
 use crate::retrieval;
@@ -101,8 +101,8 @@ After your answer, end with a short section:
         });
     }
 
-    let provider = cfg.default_provider.as_str();
-    stream_chat(provider, cfg, &messages, on_delta).await?;
+    let provider = normalize_llm_provider(&cfg.default_provider);
+    stream_chat(&provider, cfg, &messages, on_delta).await?;
 
     Ok(())
 }

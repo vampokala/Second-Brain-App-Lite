@@ -1,6 +1,7 @@
 mod atomic;
 mod chat;
 mod config;
+mod extract;
 mod ingest;
 mod llm;
 mod manifest;
@@ -10,8 +11,8 @@ mod secrets;
 mod sessions;
 mod wiki;
 
-use config::{load_config, save_config, resolved_triple, AppConfig};
-use ingest::{run_ingest, FileIngestResult};
+use config::{load_config, normalize_llm_provider, save_config, resolved_triple, AppConfig};
+use ingest::{run_ingest, FileIngestResult, IngestProgressPayload};
 use serde::Deserialize;
 use sessions::{delete_session, list_sessions, load_session, save_session, SessionFile};
 use std::path::PathBuf;
@@ -111,6 +112,7 @@ fn save_api_secret(provider: String, secret: String) -> Result<(), String> {
         "openai" => "openai_api_key",
         "anthropic" => "anthropic_api_key",
         "compatible" => "compatible_api_key",
+        "gemini" => "gemini_api_key",
         _ => return Err("unknown provider".into()),
     };
     secrets::set_secret(account, &secret).map_err(|e| e.to_string())
@@ -122,6 +124,7 @@ fn api_secret_hint(provider: String) -> Result<Option<String>, String> {
         "openai" => "openai_api_key",
         "anthropic" => "anthropic_api_key",
         "compatible" => "compatible_api_key",
+        "gemini" => "gemini_api_key",
         _ => return Err("unknown provider".into()),
     };
     secrets::masked_hint(account).map_err(|e| e.to_string())
@@ -159,6 +162,41 @@ async fn run_ingest_cmd(
     cfg: AppConfig,
     full_tier: bool,
 ) -> Result<Vec<FileIngestResult>, String> {
+    run_ingest(&cfg, full_tier, |progress| {
+        let _ = app.emit("ingest-progress", progress);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestPastePayload {
+    pub content: String,
+    #[serde(default)]
+    pub file_stem: Option<String>,
+}
+
+/// Saves pasted text as `raw/pastes/<name>.md` then runs the normal ingest pass.
+#[tauri::command]
+async fn ingest_pasted_text_cmd(
+    app: tauri::AppHandle,
+    cfg: AppConfig,
+    full_tier: bool,
+    payload: IngestPastePayload,
+) -> Result<Vec<FileIngestResult>, String> {
+    let rel = ingest::save_paste_to_raw(&cfg, &payload.content, payload.file_stem.as_deref())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "ingest-progress",
+        IngestProgressPayload {
+            phase: "paste".into(),
+            message: format!("Saved raw/{rel}; running ingest…"),
+            current: None,
+            total: None,
+            relative_path: Some(rel),
+        },
+    );
     run_ingest(&cfg, full_tier, |progress| {
         let _ = app.emit("ingest-progress", progress);
     })
@@ -369,8 +407,8 @@ async fn update_memory_roll_up(cfg: AppConfig, session_id: String) -> Result<(),
         },
     ];
 
-    let provider = cfg.default_provider.as_str();
-    let out = llm::complete_chat(provider, &cfg, &messages)
+    let provider = normalize_llm_provider(&cfg.default_provider);
+    let out = llm::complete_chat(&provider, &cfg, &messages)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -408,6 +446,7 @@ pub fn run() {
             api_secret_hint,
             fetch_ollama_models,
             run_ingest_cmd,
+            ingest_pasted_text_cmd,
             list_chat_sessions,
             load_chat_session,
             save_chat_session,
