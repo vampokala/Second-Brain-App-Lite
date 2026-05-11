@@ -15,6 +15,7 @@ export type AppConfig = {
   compatibleBaseUrl: string
   compatibleModel: string
   theme: string
+  retrievalTrackFilter?: string | null
 }
 
 export type SessionFile = {
@@ -37,6 +38,14 @@ export type IngestProgressPayload = {
   current?: number
   total?: number
   relativePath?: string
+}
+
+export type IngestTrackMode = 'existing' | 'new' | 'auto'
+
+export type TrackInference = {
+  trackId?: string | null
+  confidence: number
+  reason: string
 }
 
 export type SchemaStatus = {

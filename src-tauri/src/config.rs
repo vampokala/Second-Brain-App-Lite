@@ -41,6 +41,8 @@ pub struct AppConfig {
     pub gemini_model: String,
     #[serde(default)]
     pub theme: String,
+    #[serde(default)]
+    pub retrieval_track_filter: Option<String>,
 }
 
 fn default_provider() -> String {
@@ -100,6 +102,7 @@ impl Default for AppConfig {
             gemini_base_url: default_gemini_base_url(),
             gemini_model: default_gemini_model(),
             theme: "system".into(),
+            retrieval_track_filter: None,
         }
     }
 }

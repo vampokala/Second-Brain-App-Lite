@@ -44,7 +44,12 @@ pub async fn stream_session_chat(
     let glossary_excerpt = wiki::read_optional(&wiki_dir.join("glossary.md"), 6000);
     let memory = load_memory_excerpt(4000);
 
-    let hits = retrieval::search(&wiki_dir, &user_message, 8);
+    let track_filter = cfg
+        .retrieval_track_filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let hits = retrieval::search(&wiki_dir, &user_message, 8, track_filter);
     let mut retrieved = String::new();
     for h in &hits {
         retrieved.push_str(&format!(

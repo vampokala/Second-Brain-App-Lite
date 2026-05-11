@@ -12,7 +12,7 @@ mod sessions;
 mod wiki;
 
 use config::{load_config, normalize_llm_provider, save_config, resolved_triple, AppConfig};
-use ingest::{run_ingest, FileIngestResult, IngestProgressPayload};
+use ingest::{run_ingest, FileIngestResult, IngestProgressPayload, TrackInference};
 use serde::Deserialize;
 use sessions::{delete_session, list_sessions, load_session, save_session, SessionFile};
 use std::path::PathBuf;
@@ -38,13 +38,6 @@ pub struct SchemaStatus {
 #[tauri::command]
 fn get_platform_os() -> &'static str {
     std::env::consts::OS
-}
-
-#[tauri::command]
-fn get_app_data_dir() -> Result<String, String> {
-    paths::user_data_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -168,8 +161,13 @@ async fn run_ingest_cmd(
     app: tauri::AppHandle,
     cfg: AppConfig,
     full_tier: bool,
+    track_id: Option<String>,
 ) -> Result<Vec<FileIngestResult>, String> {
-    run_ingest(&cfg, full_tier, |progress| {
+    let track = track_id
+        .as_deref()
+        .map(ingest::sanitize_track_id)
+        .filter(|s| !s.is_empty());
+    run_ingest(&cfg, full_tier, track.as_deref(), |progress| {
         let _ = app.emit("ingest-progress", progress);
     })
     .await
@@ -182,6 +180,30 @@ pub struct IngestPastePayload {
     pub content: String,
     #[serde(default)]
     pub file_stem: Option<String>,
+    #[serde(default)]
+    pub track_id: Option<String>,
+    #[serde(default)]
+    pub auto_detect_track: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestUrlPayload {
+    pub url: String,
+    #[serde(default)]
+    pub file_stem: Option<String>,
+    #[serde(default)]
+    pub track_id: Option<String>,
+    #[serde(default)]
+    pub auto_detect_track: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferTrackPayload {
+    pub content: String,
+    #[serde(default)]
+    pub hint: Option<String>,
 }
 
 /// Saves pasted text as `raw/pastes/<name>.md` then runs the normal ingest pass.
@@ -192,7 +214,48 @@ async fn ingest_pasted_text_cmd(
     full_tier: bool,
     payload: IngestPastePayload,
 ) -> Result<Vec<FileIngestResult>, String> {
-    let rel = ingest::save_paste_to_raw(&cfg, &payload.content, payload.file_stem.as_deref())
+    let inferred = if let Some(t) = payload.track_id.as_deref() {
+        TrackInference {
+            track_id: Some(ingest::sanitize_track_id(t)),
+            confidence: 1.0,
+            reason: "User selected track".into(),
+        }
+    } else if payload.auto_detect_track {
+        ingest::infer_track_for_content_detailed(&cfg, &payload.content, None).map_err(|e| e.to_string())?
+    } else {
+        TrackInference {
+            track_id: None,
+            confidence: 0.0,
+            reason: "No track selected".into(),
+        }
+    };
+    let chosen_track = inferred.track_id.clone();
+    let route_msg = if let Some(t) = chosen_track.as_deref() {
+        format!(
+            "Routing content to track '{}' (confidence {:.0}%, {}).",
+            t,
+            inferred.confidence * 100.0,
+            inferred.reason
+        )
+    } else {
+        "No track resolved; using inbox fallback.".to_string()
+    };
+    let _ = app.emit(
+        "ingest-progress",
+        IngestProgressPayload {
+            phase: "route".into(),
+            message: route_msg,
+            current: None,
+            total: None,
+            relative_path: None,
+        },
+    );
+    let rel = ingest::save_paste_to_raw(
+        &cfg,
+        &payload.content,
+        payload.file_stem.as_deref(),
+        chosen_track.as_deref(),
+    )
         .map_err(|e| e.to_string())?;
     let _ = app.emit(
         "ingest-progress",
@@ -204,11 +267,93 @@ async fn ingest_pasted_text_cmd(
             relative_path: Some(rel),
         },
     );
-    run_ingest(&cfg, full_tier, |progress| {
+    run_ingest(&cfg, full_tier, None, |progress| {
         let _ = app.emit("ingest-progress", progress);
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn ingest_url_cmd(
+    app: tauri::AppHandle,
+    cfg: AppConfig,
+    full_tier: bool,
+    payload: IngestUrlPayload,
+) -> Result<Vec<FileIngestResult>, String> {
+    if payload.url.trim().is_empty() {
+        return Err("url is required".into());
+    }
+    let inferred = if let Some(t) = payload.track_id.as_deref() {
+        TrackInference {
+            track_id: Some(ingest::sanitize_track_id(t)),
+            confidence: 1.0,
+            reason: "User selected track".into(),
+        }
+    } else if payload.auto_detect_track {
+        ingest::infer_track_for_content_detailed(&cfg, &payload.url, Some(&payload.url)).map_err(|e| e.to_string())?
+    } else {
+        TrackInference {
+            track_id: None,
+            confidence: 0.0,
+            reason: "No track selected".into(),
+        }
+    };
+    let chosen_track = inferred.track_id.clone();
+    let route_msg = if let Some(t) = chosen_track.as_deref() {
+        format!(
+            "Routing URL to track '{}' (confidence {:.0}%, {}).",
+            t,
+            inferred.confidence * 100.0,
+            inferred.reason
+        )
+    } else {
+        "No track resolved; using inbox fallback.".to_string()
+    };
+    let _ = app.emit(
+        "ingest-progress",
+        IngestProgressPayload {
+            phase: "route".into(),
+            message: route_msg,
+            current: None,
+            total: None,
+            relative_path: None,
+        },
+    );
+    let rel = ingest::save_url_to_raw(
+        &cfg,
+        payload.url.trim(),
+        payload.file_stem.as_deref(),
+        chosen_track.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "ingest-progress",
+        IngestProgressPayload {
+            phase: "url".into(),
+            message: format!("Saved raw/{rel}; running ingest…"),
+            current: None,
+            total: None,
+            relative_path: Some(rel),
+        },
+    );
+    run_ingest(&cfg, full_tier, None, |progress| {
+        let _ = app.emit("ingest-progress", progress);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_tracks_cmd(cfg: AppConfig) -> Result<Vec<String>, String> {
+    ingest::list_tracks(&cfg).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn infer_track_cmd(cfg: AppConfig, payload: InferTrackPayload) -> Result<TrackInference, String> {
+    ingest::infer_track_for_content_detailed(&cfg, &payload.content, payload.hint.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -478,7 +623,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_platform_os,
-            get_app_data_dir,
             load_app_config,
             save_app_config,
             pick_vault_folder,
@@ -490,6 +634,9 @@ pub fn run() {
             fetch_ollama_models,
             run_ingest_cmd,
             ingest_pasted_text_cmd,
+            ingest_url_cmd,
+            list_tracks_cmd,
+            infer_track_cmd,
             list_chat_sessions,
             load_chat_session,
             save_chat_session,

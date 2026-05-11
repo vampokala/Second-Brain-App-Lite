@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { useState } from 'react'
-import type { AppConfig, FileIngestResult, IngestProgressPayload } from '@/types'
+import { useCallback, useState } from 'react'
+import type { AppConfig, FileIngestResult, IngestProgressPayload, TrackInference } from '@/types'
 
 function formatLine(p: IngestProgressPayload): string {
   const step = p.current != null && p.total != null ? `[${p.current}/${p.total}] ` : ''
@@ -21,12 +21,16 @@ export function useIngest() {
       setLogLines((prev) => [...prev, formatLine(ev.payload)])
     })
 
-  const runIngest = async (cfg: AppConfig, fullTier: boolean): Promise<FileIngestResult[]> => {
+  const runIngest = async (cfg: AppConfig, fullTier: boolean, trackId?: string): Promise<FileIngestResult[]> => {
     setBusy(true)
     reset()
     const unlisten = await subscribe()
     try {
-      const result = await invoke<FileIngestResult[]>('run_ingest_cmd', { cfg, fullTier })
+      const result = await invoke<FileIngestResult[]>('run_ingest_cmd', {
+        cfg,
+        fullTier,
+        trackId: trackId?.trim() || undefined,
+      })
       setRows(result)
       return result
     } finally {
@@ -40,6 +44,8 @@ export function useIngest() {
     fullTier: boolean,
     pasteBody: string,
     pasteTitle?: string,
+    trackId?: string,
+    autoDetectTrack?: boolean,
   ): Promise<FileIngestResult[]> => {
     setBusy(true)
     reset()
@@ -48,7 +54,12 @@ export function useIngest() {
       const result = await invoke<FileIngestResult[]>('ingest_pasted_text_cmd', {
         cfg,
         fullTier,
-        payload: { content: pasteBody, fileStem: pasteTitle?.trim() || undefined },
+        payload: {
+          content: pasteBody,
+          fileStem: pasteTitle?.trim() || undefined,
+          trackId: trackId?.trim() || undefined,
+          autoDetectTrack: !!autoDetectTrack,
+        },
       })
       setRows(result)
       return result
@@ -58,5 +69,50 @@ export function useIngest() {
     }
   }
 
-  return { busy, rows, logLines, runIngest, pasteAndIngest }
+  const ingestUrl = async (
+    cfg: AppConfig,
+    fullTier: boolean,
+    url: string,
+    fileStem?: string,
+    trackId?: string,
+    autoDetectTrack?: boolean,
+  ): Promise<FileIngestResult[]> => {
+    setBusy(true)
+    reset()
+    const unlisten = await subscribe()
+    try {
+      const result = await invoke<FileIngestResult[]>('ingest_url_cmd', {
+        cfg,
+        fullTier,
+        payload: {
+          url: url.trim(),
+          fileStem: fileStem?.trim() || undefined,
+          trackId: trackId?.trim() || undefined,
+          autoDetectTrack: !!autoDetectTrack,
+        },
+      })
+      setRows(result)
+      return result
+    } finally {
+      unlisten()
+      setBusy(false)
+    }
+  }
+
+  const listTracks = useCallback(async (cfg: AppConfig): Promise<string[]> =>
+    invoke<string[]>('list_tracks_cmd', { cfg }), [])
+
+  const inferTrack = useCallback(
+    async (cfg: AppConfig, content: string, hint?: string): Promise<TrackInference> =>
+      invoke<TrackInference>('infer_track_cmd', {
+        cfg,
+        payload: {
+          content,
+          hint: hint?.trim() || undefined,
+        },
+      }),
+    [],
+  )
+
+  return { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack }
 }

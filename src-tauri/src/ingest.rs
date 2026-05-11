@@ -50,6 +50,14 @@ pub struct FileIngestResult {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackInference {
+    pub track_id: Option<String>,
+    pub confidence: f32,
+    pub reason: String,
+}
+
 fn strip_json_fence(s: &str) -> String {
     let s = s.trim();
     let Some(pos) = s.find("```") else {
@@ -157,10 +165,142 @@ fn kebab_slug(path: &Path) -> String {
         })
 }
 
+pub fn sanitize_track_id(input: &str) -> String {
+    input
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .fold(String::new(), |mut acc, c| {
+            if acc.ends_with('-') && c == '-' {
+                acc
+            } else {
+                acc.push(c);
+                acc
+            }
+        })
+}
+
+fn track_from_rel(rel: &str) -> Option<String> {
+    let mut parts = rel.split('/');
+    let head = parts.next()?.trim();
+    if head.is_empty() {
+        return None;
+    }
+    let t = sanitize_track_id(head);
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+fn ensure_track_tag(tags: &[String], track: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = tags.iter().filter(|t| !t.trim().is_empty()).cloned().collect();
+    if let Some(t) = track {
+        let marker = format!("track:{t}");
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(&marker)) {
+            out.push(marker);
+        }
+    }
+    out
+}
+
+pub fn list_tracks(cfg: &AppConfig) -> Result<Vec<String>> {
+    let (raw_dir, _, _) = resolved_triple(cfg)?;
+    let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
+    let mut tracks = vec![];
+    let Ok(entries) = std::fs::read_dir(&raw_dir) else {
+        return Ok(tracks);
+    };
+    for ent in entries.flatten() {
+        let Ok(ft) = ent.file_type() else {
+            continue;
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = ent.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let tid = sanitize_track_id(&name);
+        if tid.is_empty() {
+            continue;
+        }
+        tracks.push(tid);
+    }
+    tracks.sort();
+    tracks.dedup();
+    Ok(tracks)
+}
+
+pub fn infer_track_for_content_detailed(
+    cfg: &AppConfig,
+    content: &str,
+    hint: Option<&str>,
+) -> Result<TrackInference> {
+    let tracks = list_tracks(cfg)?;
+    if tracks.is_empty() {
+        return Ok(TrackInference {
+            track_id: None,
+            confidence: 0.0,
+            reason: "No tracks found under raw/".into(),
+        });
+    }
+    let hay = format!("{} {}", hint.unwrap_or_default(), content).to_lowercase();
+    let mut best: Option<(String, usize)> = None;
+    let mut second_best = 0usize;
+    for t in tracks {
+        let mut score = 0usize;
+        for token in t.split('-').filter(|x| x.len() > 2) {
+            score += hay.matches(token).count();
+        }
+        if hay.contains(&t) {
+            score += 3;
+        }
+        if score == 0 {
+            continue;
+        }
+        match &best {
+            None => best = Some((t, score)),
+            Some((_, s)) if score > *s => {
+                second_best = *s;
+                best = Some((t, score));
+            }
+            Some((_, s)) if score > second_best && score <= *s => {
+                second_best = score;
+            }
+            _ => {}
+        }
+    }
+    let Some((track, top_score)) = best else {
+        return Ok(TrackInference {
+            track_id: None,
+            confidence: 0.0,
+            reason: "No confident token matches found".into(),
+        });
+    };
+    let confidence = if top_score == 0 {
+        0.0
+    } else {
+        (top_score as f32 / (top_score + second_best + 1) as f32).min(0.99)
+    };
+    Ok(TrackInference {
+        track_id: Some(track),
+        confidence,
+        reason: format!("topScore={top_score}, runnerUp={second_best}"),
+    })
+}
+
 fn build_frontmatter(
     title: &str,
     raw_rel: &str,
     tags: &[String],
+    track_id: Option<&str>,
     today: &str,
 ) -> Result<String> {
     let mut root = serde_yaml::Mapping::new();
@@ -187,7 +327,7 @@ fn build_frontmatter(
         serde_yaml::Value::Sequence(sources),
     );
     let mut tag_seq = serde_yaml::Sequence::new();
-    for t in tags {
+    for t in ensure_track_tag(tags, track_id).iter() {
         tag_seq.push(serde_yaml::Value::String(t.clone()));
     }
     root.insert(
@@ -198,12 +338,12 @@ fn build_frontmatter(
     Ok(format!("---\n{}---\n\n", yaml))
 }
 
-fn upsert_index_sources(index_content: &str, slug: &str, summary: &str, today: &str) -> String {
+fn upsert_index_sources(index_content: &str, source_rel: &str, summary: &str, today: &str) -> String {
     let line = format!(
         "- [[sources/{}]] — {} | source | {}",
-        slug, summary, today
+        source_rel, summary, today
     );
-    let anchor = format!("[[sources/{}]]", slug);
+    let anchor = format!("[[sources/{}]]", source_rel);
     if index_content.contains(&anchor) {
         return index_content.to_string();
     }
@@ -227,11 +367,11 @@ fn upsert_index_sources(index_content: &str, slug: &str, summary: &str, today: &
     )
 }
 
-fn append_log(wiki_dir: &Path, title: &str, slug: &str, today: &str) -> Result<()> {
+fn append_log(wiki_dir: &Path, title: &str, source_rel: &str, today: &str) -> Result<()> {
     let log_path = wiki_dir.join("log.md");
     let entry = format!(
         "\n## [{}] ingest | {}\n\nPages created: wiki/sources/{}.md\nPages updated: wiki/index.md, wiki/log.md\nKey additions: lite ingest summary page\n\n",
-        today, title, slug
+        today, title, source_rel
     );
     let mut prev = std::fs::read_to_string(&log_path).unwrap_or_default();
     prev.push_str(&entry);
@@ -273,14 +413,23 @@ fn slugify_paste_stem(input: &str) -> String {
 }
 
 /// Writes UTF-8 markdown under `raw/pastes/`. Returns path relative to `raw/` (e.g. `pastes/note.md`).
-pub fn save_paste_to_raw(cfg: &AppConfig, content: &str, stem_opt: Option<&str>) -> Result<String> {
+pub fn save_paste_to_raw(
+    cfg: &AppConfig,
+    content: &str,
+    stem_opt: Option<&str>,
+    track_opt: Option<&str>,
+) -> Result<String> {
     if content.len() > MAX_PASTE_BYTES {
         anyhow::bail!("paste exceeds {} KiB", MAX_PASTE_BYTES / 1024);
     }
     let (raw_dir, _, _) = resolved_triple(cfg)?;
     let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
-    let paste_dir = raw_dir.join("pastes");
-    std::fs::create_dir_all(&paste_dir).context("create raw/pastes")?;
+    let track = track_opt
+        .map(sanitize_track_id)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "inbox".into());
+    let paste_dir = raw_dir.join(&track).join("pastes");
+    std::fs::create_dir_all(&paste_dir).context("create raw/<track>/pastes")?;
 
     let mut stem = stem_opt
         .map(slugify_paste_stem)
@@ -305,13 +454,76 @@ pub fn save_paste_to_raw(cfg: &AppConfig, content: &str, stem_opt: Option<&str>)
         }
     }
 
-    let rel = format!("pastes/{candidate}.md");
+    let rel = format!("{track}/pastes/{candidate}.md");
     atomic::atomic_write(&path, content.as_bytes())
         .with_context(|| format!("write {}", path.display()))?;
     Ok(rel)
 }
 
-pub async fn run_ingest<F>(cfg: &AppConfig, full_tier: bool, mut on_progress: F) -> Result<Vec<FileIngestResult>>
+fn slug_from_url(url: &str) -> String {
+    sanitize_track_id(url)
+        .chars()
+        .take(80)
+        .collect::<String>()
+}
+
+pub async fn save_url_to_raw(
+    cfg: &AppConfig,
+    url: &str,
+    stem_opt: Option<&str>,
+    track_opt: Option<&str>,
+) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let res = client.get(url).send().await.context("fetch url")?;
+    if !res.status().is_success() {
+        anyhow::bail!("fetch failed with status {}", res.status());
+    }
+    let body = res.text().await.context("read url body")?;
+    let title_re = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("title regex");
+    let title = title_re
+        .captures(&body)
+        .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Web Article".into());
+    let cleaned = crate::extract::extract_plain_text(Path::new("page.html"), body.as_bytes())
+        .unwrap_or_else(|_| body.clone());
+
+    let mut stem = stem_opt
+        .map(slugify_paste_stem)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| slug_from_url(url));
+    if stem.is_empty() {
+        stem = format!("web-{}", Utc::now().format("%Y%m%d-%H%M%S"));
+    }
+
+    let content = format!(
+        "# {}\n\nSource URL: {}\nFetched At: {}\n\n---\n\n{}",
+        title,
+        url,
+        Utc::now().to_rfc3339(),
+        cleaned
+    );
+    let track = track_opt
+        .map(sanitize_track_id)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "inbox".into());
+    let (raw_dir, _, _) = resolved_triple(cfg)?;
+    let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
+    let web_dir = raw_dir.join(&track).join("web");
+    std::fs::create_dir_all(&web_dir)?;
+    let out = web_dir.join(format!("{stem}.md"));
+    atomic::atomic_write(&out, content.as_bytes())?;
+    Ok(format!("{track}/web/{stem}.md"))
+}
+
+pub async fn run_ingest<F>(
+    cfg: &AppConfig,
+    full_tier: bool,
+    track_filter: Option<&str>,
+    mut on_progress: F,
+) -> Result<Vec<FileIngestResult>>
 where
     F: FnMut(IngestProgressPayload) + Send,
 {
@@ -336,10 +548,11 @@ where
     let glossary_excerpt = wiki::read_optional(&wiki_dir.join("glossary.md"), 8000);
 
     let provider = normalize_llm_provider(&cfg.default_provider);
-    let mut manifest = crate::manifest::load_manifest()?;
+    let mut manifest = crate::manifest::load_manifest_for(&raw_dir)?;
     let mut results = vec![];
 
     let mut raw_paths: Vec<PathBuf> = Vec::new();
+    let track_filter = track_filter.map(sanitize_track_id).filter(|s| !s.is_empty());
     for entry in WalkDir::new(&raw_dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
@@ -347,6 +560,16 @@ where
         let path = entry.path();
         if !crate::extract::is_supported_raw_file(path) {
             continue;
+        }
+        if let Some(tf) = track_filter.as_ref() {
+            let rel = path
+                .strip_prefix(&raw_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !rel.starts_with(&format!("{}/", tf)) {
+                continue;
+            }
         }
         raw_paths.push(path.to_path_buf());
     }
@@ -457,6 +680,7 @@ where
             continue;
         }
         let fallback_slug = kebab_slug(path);
+        let track_id = track_from_rel(&rel);
 
         let tier_hint = if full_tier {
             "Full tier: also propose glossary_patch with any important new terms (markdown bullets)."
@@ -464,10 +688,15 @@ where
             "Lite tier: glossary_patch only if a few critical terms are obvious."
         };
 
+        let track_hint = track_id
+            .as_ref()
+            .map(|t| format!("Track namespace: {t}. Keep this identity explicit in title/body and include tag track:{t}."))
+            .unwrap_or_else(|| "Track namespace: unknown/inbox. Infer a concise domain tag when obvious.".into());
         let sys = format!(
-            "{}\n\nYou output ONLY valid JSON (no markdown fences). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown (markdown body WITHOUT YAML frontmatter), tags (string array), glossary_patch (string or empty).\n\n{}",
+            "{}\n\nYou output ONLY valid JSON (no markdown fences). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown (markdown body WITHOUT YAML frontmatter), tags (string array), glossary_patch (string or empty).\n\n{}\n{}",
             tier_hint,
-            "Integrate with existing wiki style per schema."
+            "Integrate with existing wiki style per schema.",
+            track_hint
         );
 
         let user = format!(
@@ -548,6 +777,7 @@ where
             &parsed.title,
             &rel,
             &parsed.tags,
+            track_id.as_deref(),
             &today,
         ) {
             Ok(fm) => fm,
@@ -570,7 +800,8 @@ where
         };
 
         let page = format!("{}{}", fm, parsed.body_markdown);
-        let sources_dir = wiki_dir.join("sources");
+        let track_folder = track_id.clone().unwrap_or_else(|| "inbox".into());
+        let sources_dir = wiki_dir.join("sources").join(&track_folder);
         std::fs::create_dir_all(&sources_dir)?;
         let out_path = sources_dir.join(format!("{}.md", slug));
         if let Err(e) = atomic::atomic_write(&out_path, page.as_bytes()) {
@@ -592,9 +823,10 @@ where
 
         let index_path = wiki_dir.join("index.md");
         let index_body = std::fs::read_to_string(&index_path).unwrap_or_default();
+        let source_rel = format!("{}/{}", track_folder, slug);
         let new_index = upsert_index_sources(
             &index_body,
-            &slug,
+            &source_rel,
             &parsed.one_line_summary,
             &today,
         );
@@ -615,7 +847,7 @@ where
             continue;
         }
 
-        if let Err(e) = append_log(&wiki_dir, &parsed.title, &slug, &today) {
+        if let Err(e) = append_log(&wiki_dir, &parsed.title, &source_rel, &today) {
             let detail = format!("log: {}", e);
             on_progress(IngestProgressPayload {
                 phase: "error".into(),
@@ -654,11 +886,11 @@ where
             ManifestEntry {
                 content_sha256: hash,
                 last_ingest_at: Utc::now().to_rfc3339(),
-                wiki_paths: vec![format!("sources/{}.md", slug)],
+                wiki_paths: vec![format!("sources/{}/{}.md", track_folder, slug)],
             },
         );
 
-        let wrote = format!("sources/{}.md", slug);
+        let wrote = format!("sources/{}/{}.md", track_folder, slug);
         on_progress(IngestProgressPayload {
             phase: "ok".into(),
             message: format!("Wrote wiki/{wrote}; appended wiki/log.md"),
@@ -674,7 +906,7 @@ where
         });
     }
 
-    crate::manifest::save_manifest(&manifest)?;
+    crate::manifest::save_manifest_for(&raw_dir, &manifest)?;
 
     let ok_n = results.iter().filter(|r| r.status == "ok").count();
     let err_n = results.iter().filter(|r| r.status == "error").count();
@@ -723,5 +955,51 @@ mod tests {
         let v = parse_ingest_json(raw).unwrap();
         assert_eq!(v.title, "T");
         assert_eq!(v.body_markdown, "Body");
+    }
+
+    #[test]
+    fn sanitize_track_id_normalizes() {
+        assert_eq!(sanitize_track_id(" Claims Team "), "claims-team");
+        assert_eq!(sanitize_track_id("sales___ops"), "sales-ops");
+    }
+
+    #[test]
+    fn upsert_index_sources_supports_namespaced_paths() {
+        let idx = "## Sources\n\n";
+        let out = upsert_index_sources(idx, "claims/meeting-notes", "Summary", "2026-05-11");
+        assert!(out.contains("[[sources/claims/meeting-notes]]"));
+    }
+
+    #[test]
+    fn infer_track_detailed_returns_confidence() {
+        let suite_root = std::env::temp_dir().join(format!(
+            "sb-lite-track-inf-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let raw_root = suite_root.join("raw");
+        let wiki_root = suite_root.join("wiki");
+        let schema_root = suite_root.join("schema");
+        std::fs::create_dir_all(raw_root.join("claims-modernization")).unwrap();
+        std::fs::create_dir_all(raw_root.join("sales-pipeline")).unwrap();
+        std::fs::create_dir_all(&wiki_root).unwrap();
+        std::fs::create_dir_all(&schema_root).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.raw_dir = Some(raw_root.to_string_lossy().to_string());
+        cfg.wiki_dir = Some(wiki_root.to_string_lossy().to_string());
+        cfg.schema_dir = Some(schema_root.to_string_lossy().to_string());
+
+        let inf = infer_track_for_content_detailed(
+            &cfg,
+            "Today we discussed claims modernization milestones",
+            None,
+        )
+        .unwrap();
+        assert_eq!(inf.track_id.as_deref(), Some("claims-modernization"));
+        assert!(inf.confidence > 0.1);
+        let _ = std::fs::remove_dir_all(suite_root);
     }
 }
