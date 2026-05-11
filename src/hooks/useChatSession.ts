@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AppConfig, SessionFile } from '@/types'
+import type { AppConfig, ChatRetrievalMeta, SessionFile } from '@/types'
 
 export function useChatSession(activeSessionId: string | null, setActiveSessionId: (id: string) => void) {
   const [sessions, setSessions] = useState<SessionFile[]>([])
@@ -9,7 +9,20 @@ export function useChatSession(activeSessionId: string | null, setActiveSessionI
   const [sendBusy, setSendBusy] = useState(false)
   const [streamTail, setStreamTail] = useState('')
   const [saveTitle, setSaveTitle] = useState('Chat insight')
+  const [wikiSourcesOnly, setWikiSourcesOnly] = useState(true)
+  const [includeWebSearch, setIncludeWebSearch] = useState(false)
+  const [braveKeyConfigured, setBraveKeyConfigured] = useState(false)
+  const [lastRetrievalMeta, setLastRetrievalMeta] = useState<ChatRetrievalMeta | null>(null)
   const hasFetchedRef = useRef(false)
+
+  const refreshBraveHint = useCallback(async () => {
+    try {
+      const h = await invoke<string | null>('api_secret_hint', { provider: 'brave' })
+      setBraveKeyConfigured(Boolean(h?.trim()))
+    } catch {
+      setBraveKeyConfigured(false)
+    }
+  }, [])
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -25,7 +38,12 @@ export function useChatSession(activeSessionId: string | null, setActiveSessionI
     if (hasFetchedRef.current) return
     hasFetchedRef.current = true
     refreshSessions()
-  }, [refreshSessions])
+    void refreshBraveHint()
+  }, [refreshSessions, refreshBraveHint])
+
+  useEffect(() => {
+    setLastRetrievalMeta(null)
+  }, [activeSessionId])
 
   const newSession = async (): Promise<SessionFile> => {
     const s = await invoke<SessionFile>('new_chat_session')
@@ -43,14 +61,29 @@ export function useChatSession(activeSessionId: string | null, setActiveSessionI
     setStreamTail('')
     const userMessage = composer.trim()
     setComposer('')
-    const un = await listen<string>('chat-token', (ev) => {
+    const unToken = await listen<string>('chat-token', (ev) => {
       setStreamTail((t) => t + ev.payload)
     })
+    const unMeta = await listen<ChatRetrievalMeta>('chat-retrieval-meta', (ev) => {
+      setLastRetrievalMeta(ev.payload)
+      if (ev.payload.braveKeyConfigured !== undefined) {
+        setBraveKeyConfigured(ev.payload.braveKeyConfigured)
+      }
+    })
     try {
-      await invoke('chat_stream_cmd', { cfg, payload: { sessionId: activeSessionId, userMessage } })
+      await invoke('chat_stream_cmd', {
+        cfg,
+        payload: {
+          sessionId: activeSessionId,
+          userMessage,
+          wikiSourcesOnly,
+          includeWebSearch,
+        },
+      })
       await refreshSessions()
     } finally {
-      un()
+      unToken()
+      unMeta()
       setSendBusy(false)
       setStreamTail('')
     }
@@ -76,6 +109,10 @@ export function useChatSession(activeSessionId: string | null, setActiveSessionI
     composer, setComposer,
     sendBusy, streamTail,
     saveTitle, setSaveTitle,
+    wikiSourcesOnly, setWikiSourcesOnly,
+    includeWebSearch, setIncludeWebSearch,
+    braveKeyConfigured, refreshBraveHint,
+    lastRetrievalMeta,
     sendChat, saveLastToWiki, rollMemory,
   }
 }

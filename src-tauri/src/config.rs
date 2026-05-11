@@ -43,6 +43,21 @@ pub struct AppConfig {
     pub theme: String,
     #[serde(default)]
     pub retrieval_track_filter: Option<String>,
+    /// Brave Web Search `count` (max ~20 per API).
+    #[serde(default = "default_brave_search_count")]
+    pub brave_search_count: u32,
+    /// Max result URLs to fetch after Brave search.
+    #[serde(default = "default_brave_fetch_max_urls")]
+    pub brave_fetch_max_urls: u32,
+    /// Per-URL HTTP timeout (seconds) for page fetches.
+    #[serde(default = "default_brave_fetch_timeout_secs")]
+    pub brave_fetch_timeout_secs: u64,
+    /// Max characters of plain text per fetched page injected into chat.
+    #[serde(default = "default_brave_page_max_chars")]
+    pub brave_page_max_chars: usize,
+    /// Max response body bytes read when fetching a page.
+    #[serde(default = "default_brave_max_body_bytes")]
+    pub brave_max_body_bytes: usize,
 }
 
 fn default_provider() -> String {
@@ -83,6 +98,26 @@ fn default_gemini_model() -> String {
     "gemini-3.1-flash-lite".into()
 }
 
+fn default_brave_search_count() -> u32 {
+    8
+}
+
+fn default_brave_fetch_max_urls() -> u32 {
+    5
+}
+
+fn default_brave_fetch_timeout_secs() -> u64 {
+    15
+}
+
+fn default_brave_page_max_chars() -> usize {
+    8000
+}
+
+fn default_brave_max_body_bytes() -> usize {
+    1_000_000
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -103,6 +138,11 @@ impl Default for AppConfig {
             gemini_model: default_gemini_model(),
             theme: "system".into(),
             retrieval_track_filter: None,
+            brave_search_count: default_brave_search_count(),
+            brave_fetch_max_urls: default_brave_fetch_max_urls(),
+            brave_fetch_timeout_secs: default_brave_fetch_timeout_secs(),
+            brave_page_max_chars: default_brave_page_max_chars(),
+            brave_max_body_bytes: default_brave_max_body_bytes(),
         }
     }
 }

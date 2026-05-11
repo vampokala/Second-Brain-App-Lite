@@ -122,6 +122,19 @@ sequenceDiagram
 **Save to wiki** → writes `wiki/analyses/<slug>.md`  
 **Roll up to memory** → summarises the session into `context/memory.md`, enriching future chats
 
+### Chat source toggles
+
+Each send can combine:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| **Wiki sources only** | On | BM25 retrieval over your wiki is injected into the prompt. |
+| **Web search** | Off | [Brave Web Search API](https://api.search.brave.com/) is queried; top result pages are fetched (HTTP(S) only, public IPs) and injected as **Web search results**. Requires a **Brave Search API key** in **Settings → API Keys** (or `BRAVE_SEARCH_API_KEY` in the environment). |
+
+Turn **both** off for general-purpose replies: no wiki file retrieval and no live web fetch (schema/index/glossary/memory still inform tone; answers are not vault- or web-grounded).
+
+Web fetch is best-effort: paywalls, robots, or slow hosts may reduce how many pages are available. Brave quotas and errors are surfaced in the chat stream if search fails.
+
 ---
 
 ## Prerequisites
@@ -286,6 +299,8 @@ Costs and rate limits depend on your vendor. Monitor usage on their dashboards.
 | Default provider | Settings → Provider & Models | `defaultProvider` |
 | Ollama base URL | Settings → Provider & Models | `ollamaBaseUrl` |
 | Model names | Settings → Provider & Models | `openaiModel`, `anthropicModel`, `geminiModel`, `compatibleModel` |
+| Brave search (optional) | Settings → API Keys, or env | Encrypted `brave_search_api_key`, or `BRAVE_SEARCH_API_KEY` |
+| Brave search tuning | `config.json` (optional) | `braveSearchCount`, `braveFetchMaxUrls`, `braveFetchTimeoutSecs`, `bravePageMaxChars`, `braveMaxBodyBytes` |
 
 ### Environment variable path overrides
 
@@ -295,6 +310,7 @@ Costs and rate limits depend on your vendor. Monitor usage on their dashboards.
 | `SECOND_BRAIN_RAW_DIR` | Explicit raw directory |
 | `SECOND_BRAIN_WIKI_DIR` | Explicit wiki directory |
 | `SECOND_BRAIN_SCHEMA_DIR` | Explicit schema directory |
+| `BRAVE_SEARCH_API_KEY` | Overrides stored Brave Search key for **Web search** in Chat |
 
 ---
 

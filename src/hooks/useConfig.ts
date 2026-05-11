@@ -11,17 +11,19 @@ export function useConfig() {
 
   const refreshHints = useCallback(async () => {
     try {
-      const [o, a, g, c] = await Promise.all([
+      const [o, a, g, c, b] = await Promise.all([
         invoke<string | null>('api_secret_hint', { provider: 'openai' }),
         invoke<string | null>('api_secret_hint', { provider: 'anthropic' }),
         invoke<string | null>('api_secret_hint', { provider: 'gemini' }),
         invoke<string | null>('api_secret_hint', { provider: 'compatible' }),
+        invoke<string | null>('api_secret_hint', { provider: 'brave' }),
       ])
       setHints({
         openai: o ?? undefined,
         anthropic: a ?? undefined,
         gemini: g ?? undefined,
         compatible: c ?? undefined,
+        brave: b ?? undefined,
       })
     } catch { /* ignore */ }
   }, [])

@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
+import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { chatClipboardText, useChatSession } from '@/hooks/useChatSession'
 import { cn } from '@/lib/utils'
@@ -45,6 +46,10 @@ export default function ChatView({ cfg, activeSessionId, setActiveSessionId, onB
     composer, setComposer,
     sendBusy, streamTail,
     saveTitle, setSaveTitle,
+    wikiSourcesOnly, setWikiSourcesOnly,
+    includeWebSearch, setIncludeWebSearch,
+    braveKeyConfigured,
+    lastRetrievalMeta,
     sendChat, saveLastToWiki, rollMemory,
   } = useChatSession(activeSessionId, setActiveSessionId)
 
@@ -154,7 +159,58 @@ export default function ChatView({ cfg, activeSessionId, setActiveSessionId, onB
           placeholder="Ask something… (⌘↵ to send)"
           disabled={sendBusy}
           className="min-h-20 resize-none"
+          aria-describedby={!wikiSourcesOnly && !includeWebSearch ? 'chat-sources-hint' : undefined}
         />
+        <div className="flex flex-col gap-2 text-xs text-[var(--color-muted-foreground)]">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                id="chat-wiki-only"
+                type="checkbox"
+                className="rounded border-[var(--color-border)]"
+                checked={wikiSourcesOnly}
+                onChange={(e) => setWikiSourcesOnly(e.target.checked)}
+                disabled={sendBusy}
+              />
+              <Label htmlFor="chat-wiki-only" className="font-normal cursor-pointer text-[var(--color-foreground)]">
+                Wiki sources only
+              </Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                id="chat-web-search"
+                type="checkbox"
+                className="rounded border-[var(--color-border)]"
+                checked={includeWebSearch}
+                onChange={(e) => setIncludeWebSearch(e.target.checked)}
+                disabled={sendBusy || !braveKeyConfigured}
+                title={!braveKeyConfigured ? 'Add a Brave Search API key in Settings → API Keys.' : undefined}
+              />
+              <Label htmlFor="chat-web-search" className="font-normal cursor-pointer text-[var(--color-foreground)]">
+                Web search
+              </Label>
+            </div>
+          </div>
+          {!wikiSourcesOnly && !includeWebSearch && (
+            <p id="chat-sources-hint" className="text-[var(--color-muted-foreground)]">
+              Answers are not sourced from your wiki or the web for this message.
+            </p>
+          )}
+          {lastRetrievalMeta && !sendBusy && (
+            <p className="text-[10px] uppercase tracking-wide text-[var(--color-muted-foreground)]">
+              Last send: wiki {lastRetrievalMeta.wikiSourcesOnly ? 'on' : 'off'}
+              {' · '}
+              web {lastRetrievalMeta.includeWebSearch ? 'on' : 'off'}
+              {' · '}
+              {lastRetrievalMeta.wikiSourcesOnly
+                ? `${lastRetrievalMeta.hitCount} wiki hits (max score ${lastRetrievalMeta.maxScore.toFixed(2)})`
+                : 'wiki retrieval skipped'}
+              {lastRetrievalMeta.includeWebSearch && (
+                <> · {lastRetrievalMeta.webPagesFetched} web page(s)</>
+              )}
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2 justify-between">
           <div className="flex items-center gap-1.5">
             <Button
