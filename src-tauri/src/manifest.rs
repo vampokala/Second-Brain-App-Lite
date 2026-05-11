@@ -5,7 +5,7 @@ use crate::paths::user_data_dir;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -22,12 +22,13 @@ pub struct IngestManifest {
     pub entries: HashMap<String, ManifestEntry>,
 }
 
-fn manifest_path() -> Result<PathBuf> {
-    Ok(user_data_dir()?.join("ingest-manifest.json"))
+fn manifest_path_for(raw_root: &Path) -> Result<PathBuf> {
+    let key = sha256_bytes(raw_root.to_string_lossy().as_bytes());
+    Ok(user_data_dir()?.join(format!("ingest-manifest-{}.json", &key[..16])))
 }
 
-pub fn load_manifest() -> Result<IngestManifest> {
-    let p = manifest_path()?;
+pub fn load_manifest_for(raw_root: &Path) -> Result<IngestManifest> {
+    let p = manifest_path_for(raw_root)?;
     if !p.exists() {
         return Ok(IngestManifest::default());
     }
@@ -35,8 +36,8 @@ pub fn load_manifest() -> Result<IngestManifest> {
     Ok(serde_json::from_str(&s).unwrap_or_default())
 }
 
-pub fn save_manifest(m: &IngestManifest) -> Result<()> {
-    let p = manifest_path()?;
+pub fn save_manifest_for(raw_root: &Path, m: &IngestManifest) -> Result<()> {
+    let p = manifest_path_for(raw_root)?;
     std::fs::create_dir_all(p.parent().unwrap())?;
     let json = serde_json::to_string_pretty(m)?;
     atomic::atomic_write(&p, json.as_bytes())

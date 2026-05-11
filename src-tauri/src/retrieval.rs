@@ -33,7 +33,7 @@ fn term_freq(tokens: &[String]) -> HashMap<String, usize> {
 }
 
 /// lite BM25 over filename + first chunk of body
-pub fn search(wiki_root: &Path, query: &str, limit: usize) -> Vec<RetrievalHit> {
+pub fn search(wiki_root: &Path, query: &str, limit: usize, track_filter: Option<&str>) -> Vec<RetrievalHit> {
     let q_terms = tokenize(query);
     if q_terms.is_empty() {
         return vec![];
@@ -56,6 +56,12 @@ pub fn search(wiki_root: &Path, query: &str, limit: usize) -> Vec<RetrievalHit> 
         };
         let rel = p.strip_prefix(wiki_root).unwrap_or(p);
         let name = rel.to_string_lossy().to_string();
+        if let Some(tf) = track_filter {
+            let tf = tf.trim();
+            if !tf.is_empty() && !name.starts_with(&format!("sources/{}/", tf)) {
+                continue;
+            }
+        }
         let excerpt_slice: String = body.chars().take(3500).collect();
         docs.push((rel.to_path_buf(), format!("{} {}", name, excerpt_slice)));
     }
@@ -108,4 +114,28 @@ pub fn search(wiki_root: &Path, query: &str, limit: usize) -> Vec<RetrievalHit> 
     scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
     scored
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applies_track_filter() {
+        let root = std::env::temp_dir().join(format!(
+            "sb-lite-retrieval-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(root.join("sources/claims")).unwrap();
+        std::fs::create_dir_all(root.join("sources/sales")).unwrap();
+        std::fs::write(root.join("sources/claims/a.md"), "denial workflow details").unwrap();
+        std::fs::write(root.join("sources/sales/b.md"), "pipeline forecast details").unwrap();
+        let hits = search(&root, "workflow", 8, Some("claims"));
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.starts_with("sources/claims/"));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

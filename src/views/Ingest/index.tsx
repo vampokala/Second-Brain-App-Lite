@@ -6,10 +6,10 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { useIngest } from '@/hooks/useIngest'
 import { cn } from '@/lib/utils'
-import type { AppConfig } from '@/types'
+import type { AppConfig, IngestTrackMode, TrackInference } from '@/types'
 import { invoke } from '@tauri-apps/api/core'
 import { BrainCircuit, CheckCircle2, FileText, Loader2, SkipForward, XCircle } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 type Banner = { kind: 'success' | 'error'; text: string } | null
 
@@ -20,12 +20,50 @@ function StatusIcon({ status }: { status: string }) {
 }
 
 export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; onBanner: (b: Banner) => void }) {
-  const { busy, rows, logLines, runIngest, pasteAndIngest } = useIngest()
+  const { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack } = useIngest()
   const [fullTier, setFullTier] = useState(false)
   const [pasteTitle, setPasteTitle] = useState('')
   const [pasteBody, setPasteBody] = useState('')
+  const [urlInput, setUrlInput] = useState('')
+  const [urlStem, setUrlStem] = useState('')
   const [showPaste, setShowPaste] = useState(false)
   const [memoryBusy, setMemoryBusy] = useState(false)
+  const [tracks, setTracks] = useState<string[]>([])
+  const [trackMode, setTrackMode] = useState<IngestTrackMode>('auto')
+  const [existingTrack, setExistingTrack] = useState('')
+  const [newTrack, setNewTrack] = useState('')
+  const [autoInference, setAutoInference] = useState<TrackInference | null>(null)
+
+  useEffect(() => {
+    if (!cfg) return
+    listTracks(cfg).then(setTracks).catch(() => setTracks([]))
+  }, [cfg, listTracks])
+
+  const resolvedTrackId = useMemo(() => {
+    if (trackMode === 'existing') return existingTrack.trim() || undefined
+    if (trackMode === 'new') return newTrack.trim() || undefined
+    return undefined
+  }, [trackMode, existingTrack, newTrack])
+  const invalidTrackSelection = (trackMode === 'existing' || trackMode === 'new') && !resolvedTrackId
+
+  useEffect(() => {
+    if (!cfg || trackMode !== 'auto') { setAutoInference(null); return }
+    const source = (pasteBody.trim() || urlInput.trim())
+    if (!source) { setAutoInference(null); return }
+    const timer = setTimeout(() => {
+      inferTrack(cfg, source, urlInput.trim() || undefined).then(setAutoInference).catch(() => setAutoInference(null))
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [cfg, trackMode, pasteBody, urlInput, inferTrack])
+
+  const maybeWarnLowConfidence = (): boolean => {
+    if (trackMode !== 'auto') return true
+    if (!autoInference?.trackId) return true
+    if (autoInference.confidence >= 0.45) return true
+    return window.confirm(
+      `Auto-detect confidence is low (${Math.round(autoInference.confidence * 100)}%) for track "${autoInference.trackId}". Continue anyway?`,
+    )
+  }
 
   const handleRollupToMemory = async () => {
     if (!pasteBody.trim()) { onBanner({ kind: 'error', text: 'Enter some text to roll up.' }); return }
@@ -45,7 +83,7 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
 
   const handleRunIngest = async () => {
     try {
-      const result = await runIngest(cfg, fullTier)
+      const result = await runIngest(cfg, fullTier, resolvedTrackId)
       const errCount = result.filter((r) => r.status === 'error').length
       if (errCount > 0) {
         onBanner({ kind: 'error', text: `Ingest finished with ${errCount} error(s).` })
@@ -59,14 +97,35 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
 
   const handlePasteIngest = async () => {
     if (!pasteBody.trim()) { onBanner({ kind: 'error', text: 'Enter some text to ingest.' }); return }
+    if (!maybeWarnLowConfidence()) return
     try {
-      const result = await pasteAndIngest(cfg, fullTier, pasteBody, pasteTitle)
+      const result = await pasteAndIngest(cfg, fullTier, pasteBody, pasteTitle, resolvedTrackId, trackMode === 'auto')
       const errCount = result.filter((r) => r.status === 'error').length
       if (errCount > 0) {
         onBanner({ kind: 'error', text: `Ingest finished with ${errCount} error(s).` })
       } else {
         setPasteBody('')
-        onBanner({ kind: 'success', text: `Saved to raw/pastes/ and ingested (${result.length} files).` })
+        onBanner({ kind: 'success', text: `Saved to raw/<track>/pastes and ingested (${result.length} files).` })
+        listTracks(cfg).then(setTracks).catch(() => undefined)
+      }
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    }
+  }
+
+  const handleUrlIngest = async () => {
+    if (!urlInput.trim()) { onBanner({ kind: 'error', text: 'Enter a URL to ingest.' }); return }
+    if (!maybeWarnLowConfidence()) return
+    try {
+      const result = await ingestUrl(cfg, fullTier, urlInput, urlStem, resolvedTrackId, trackMode === 'auto')
+      const errCount = result.filter((r) => r.status === 'error').length
+      if (errCount > 0) {
+        onBanner({ kind: 'error', text: `Ingest finished with ${errCount} error(s).` })
+      } else {
+        setUrlInput('')
+        setUrlStem('')
+        onBanner({ kind: 'success', text: `URL fetched and ingested (${result.length} files).` })
+        listTracks(cfg).then(setTracks).catch(() => undefined)
       }
     } catch (e) {
       onBanner({ kind: 'error', text: String(e) })
@@ -86,7 +145,7 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
       <Card>
         <CardContent className="pt-4 flex flex-col gap-4">
           <div className="flex items-center gap-3 flex-wrap">
-            <Button onClick={handleRunIngest} disabled={busy} className="gap-2">
+            <Button onClick={handleRunIngest} disabled={busy || invalidTrackSelection} className="gap-2">
               {busy ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
               {busy ? 'Ingesting…' : 'Run full ingest'}
             </Button>
@@ -103,11 +162,87 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
               Full tier (richer prompts)
             </label>
           </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label>Track mode</Label>
+              <select
+                value={trackMode}
+                onChange={(e) => setTrackMode(e.target.value as IngestTrackMode)}
+                disabled={busy}
+                className="h-9 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background)] px-3 text-sm text-[var(--color-foreground)]"
+              >
+                <option value="auto">Auto-detect</option>
+                <option value="existing">Existing track</option>
+                <option value="new">Create new track</option>
+              </select>
+            </div>
+            {trackMode === 'existing' && (
+              <div className="flex flex-col gap-1.5 md:col-span-2">
+                <Label>Select track</Label>
+                <select
+                  value={existingTrack}
+                  onChange={(e) => setExistingTrack(e.target.value)}
+                  disabled={busy}
+                  className="h-9 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background)] px-3 text-sm text-[var(--color-foreground)]"
+                >
+                  <option value="">Choose track…</option>
+                  {tracks.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+            )}
+            {trackMode === 'new' && (
+              <div className="flex flex-col gap-1.5 md:col-span-2">
+                <Label>New track ID</Label>
+                <Input
+                  value={newTrack}
+                  onChange={(e) => setNewTrack(e.target.value)}
+                  disabled={busy}
+                  placeholder="e.g. claims-modernization"
+                />
+              </div>
+            )}
+          </div>
+          {trackMode === 'auto' && autoInference && (
+            <p className="text-xs text-[var(--color-muted-foreground)]">
+              Auto route: <strong className="text-[var(--color-foreground)]">{autoInference.trackId ?? 'inbox'}</strong>
+              {' '}({Math.round(autoInference.confidence * 100)}% confidence)
+              {autoInference.reason ? ` · ${autoInference.reason}` : ''}
+            </p>
+          )}
+          <div className="border-t border-[var(--color-border)] pt-4 flex flex-col gap-3">
+            <p className="text-xs text-[var(--color-muted-foreground)]">
+              Ingest a web page into the selected track.
+            </p>
+            <div className="flex flex-col gap-1.5">
+              <Label>URL</Label>
+              <Input
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                placeholder="https://example.com/article"
+                disabled={busy}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label>Filename (optional)</Label>
+              <Input
+                value={urlStem}
+                onChange={(e) => setUrlStem(e.target.value)}
+                placeholder="e.g. architecture-notes"
+                disabled={busy}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" onClick={handleUrlIngest} disabled={busy || !urlInput.trim() || invalidTrackSelection}>
+                {busy ? <Loader2 size={14} className="animate-spin mr-1.5" /> : null}
+                {busy ? 'Working…' : 'Fetch URL & ingest'}
+              </Button>
+            </div>
+          </div>
 
           {showPaste && (
             <div className="border-t border-[var(--color-border)] pt-4 flex flex-col gap-3">
               <p className="text-xs text-[var(--color-muted-foreground)]">
-                Saves as <code className="bg-[var(--color-muted)] px-1 py-0.5 rounded">raw/pastes/&lt;name&gt;.md</code>, then runs ingest.
+                Saves as <code className="bg-[var(--color-muted)] px-1 py-0.5 rounded">raw/&lt;track&gt;/pastes/&lt;name&gt;.md</code>, then runs ingest.
               </p>
               <div className="flex flex-col gap-1.5">
                 <Label>Filename (optional)</Label>
@@ -129,7 +264,7 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
                 />
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                <Button variant="secondary" onClick={handlePasteIngest} disabled={busy || memoryBusy || !pasteBody.trim()}>
+                <Button variant="secondary" onClick={handlePasteIngest} disabled={busy || memoryBusy || !pasteBody.trim() || invalidTrackSelection}>
                   {busy ? <Loader2 size={14} className="animate-spin mr-1.5" /> : null}
                   {busy ? 'Working…' : 'Save to raw & ingest'}
                 </Button>
