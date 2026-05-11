@@ -5,8 +5,8 @@ import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { useConfig } from '@/hooks/useConfig'
 import { invoke } from '@tauri-apps/api/core'
-import { CheckCircle2, FolderOpen, XCircle } from 'lucide-react'
-import { useState } from 'react'
+import { CheckCircle2, FolderOpen, Lock, XCircle } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 type Banner = { kind: 'success' | 'error'; text: string } | null
 
@@ -55,7 +55,7 @@ function KeyRow({
       </div>
       {storedHint && (
         <p className="text-xs text-[var(--color-success)] flex items-center gap-1">
-          <CheckCircle2 size={11} /> Stored in keychain: {storedHint}
+          <CheckCircle2 size={11} /> Saved (encrypted): {storedHint}
         </p>
       )}
       {hint && <p className="text-xs text-[var(--color-muted-foreground)]">{hint}</p>}
@@ -70,15 +70,20 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
   const [anthropicKey, setAnthropicKey] = useState('')
   const [geminiKey, setGeminiKey] = useState('')
   const [compatibleKey, setCompatibleKey] = useState('')
+  const [appDataDir, setAppDataDir] = useState<string | null>(null)
+
+  useEffect(() => {
+    invoke<string>('get_app_data_dir').then(setAppDataDir).catch(() => null)
+  }, [])
 
   if (!cfg) return <div className="flex items-center justify-center h-full text-[var(--color-muted-foreground)] text-sm">Loading…</div>
 
   const osHelp =
     cfg.osHint === 'windows'
-      ? 'Paths look like C:\\Users\\you\\Vault.'
+      ? 'Vault paths use backslashes, e.g. C:\\Users\\you\\Vault. Use the folder picker to avoid typos.'
       : cfg.osHint === 'linux'
-        ? 'Ensure Secret Service is running for keyring.'
-        : 'Paths look like /Users/you/Vault.'
+        ? 'Vault paths use forward slashes, e.g. /home/you/Vault.'
+        : 'Vault paths use forward slashes, e.g. /Users/you/Vault.'
 
   const chooseVaultFolder = async () => {
     try {
@@ -119,7 +124,7 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
       await invoke('save_api_secret', { provider, secret: secret.trim() })
       clear()
       await refreshHints()
-      onBanner({ kind: 'success', text: `${provider} key saved to OS keychain.` })
+      onBanner({ kind: 'success', text: `${provider} key saved (AES-256-GCM encrypted).` })
     } catch (e) {
       onBanner({ kind: 'error', text: String(e) })
     }
@@ -278,9 +283,24 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
       <Card>
         <CardHeader>
           <CardTitle>API Keys</CardTitle>
-          <CardDescription>Keys are stored in your OS keychain — never written to disk.</CardDescription>
+          <CardDescription>
+            Encrypted with AES-256-GCM — never stored in plain text.
+            Works identically on macOS, Windows, and Linux.
+          </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
+          {appDataDir && (
+            <div className="flex items-start gap-2 rounded-[var(--radius-md)] bg-[var(--color-muted)] px-3 py-2.5 text-xs text-[var(--color-muted-foreground)]">
+              <Lock size={12} className="mt-0.5 shrink-0 text-[var(--color-accent)]" />
+              <div className="min-w-0">
+                <span className="font-medium text-[var(--color-foreground)]">Storage location: </span>
+                <code className="break-all font-mono">{appDataDir}</code>
+                <span className="block mt-0.5 opacity-80">
+                  Files: <code>secrets.key</code> (encryption key) · <code>secrets.enc</code> (encrypted secrets)
+                </span>
+              </div>
+            </div>
+          )}
           <KeyRow label="OpenAI API key" value={openaiKey} onChange={setOpenaiKey} placeholder="sk-…" storedHint={hints.openai} onSave={() => saveKey('openai', openaiKey, () => setOpenaiKey(''))} />
           <KeyRow label="Anthropic API key" value={anthropicKey} onChange={setAnthropicKey} placeholder="sk-ant-…" storedHint={hints.anthropic} onSave={() => saveKey('anthropic', anthropicKey, () => setAnthropicKey(''))} />
           <KeyRow label="Gemini API key" value={geminiKey} onChange={setGeminiKey} placeholder="AIza…" storedHint={hints.gemini} onSave={() => saveKey('gemini', geminiKey, () => setGeminiKey(''))} />

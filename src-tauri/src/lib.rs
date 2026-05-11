@@ -41,6 +41,13 @@ fn get_platform_os() -> &'static str {
 }
 
 #[tauri::command]
+fn get_app_data_dir() -> Result<String, String> {
+    paths::user_data_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn load_app_config() -> Result<AppConfig, String> {
     load_config().map_err(|e| e.to_string())
 }
@@ -471,6 +478,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_platform_os,
+            get_app_data_dir,
             load_app_config,
             save_app_config,
             pick_vault_folder,

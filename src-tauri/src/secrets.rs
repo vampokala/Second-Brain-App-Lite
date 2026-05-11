@@ -48,12 +48,16 @@ fn load_or_create_key() -> Result<Vec<u8>> {
     let key = Aes256Gcm::generate_key(OsRng);
     std::fs::write(&path, key.as_slice()).context("write secrets.key")?;
 
+    // Unix: restrict to owner-read/write only (rw-------)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .context("chmod secrets.key")?;
     }
+    // Windows: AppData\Local is already protected by NTFS ACLs so that only
+    // the current user (and SYSTEM/Administrators) can access it — no extra
+    // permission step needed.
 
     Ok(key.to_vec())
 }
