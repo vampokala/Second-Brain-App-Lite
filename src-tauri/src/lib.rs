@@ -420,6 +420,41 @@ async fn update_memory_roll_up(cfg: AppConfig, session_id: String) -> Result<(),
     Ok(())
 }
 
+/// Roll arbitrary text (e.g. pasted content from Ingest) into the rolling memory file.
+/// Unlike `update_memory_roll_up` this does not require an active chat session.
+#[tauri::command]
+async fn rollup_content_to_memory(cfg: AppConfig, content: String) -> Result<(), String> {
+    let prev = chat::load_memory_excerpt(8000);
+
+    let prompt_user = format!(
+        "Previous rolling memory:\n{}\n\nNew content to integrate:\n{}\n\nWrite an updated concise rolling memory (markdown, <= 120 lines) capturing stable facts, goals, and entities.",
+        prev, content
+    );
+
+    let messages = vec![
+        llm::LlmMessage {
+            role: "system".into(),
+            content: "You maintain a short personal memory file for the user's wiki assistant.".into(),
+        },
+        llm::LlmMessage {
+            role: "user".into(),
+            content: prompt_user,
+        },
+    ];
+
+    let provider = normalize_llm_provider(&cfg.default_provider);
+    let out = llm::complete_chat(&provider, &cfg, &messages)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mp = chat::memory_path().map_err(|e| e.to_string())?;
+    if let Some(parent) = mp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    atomic::atomic_write(&mp, out.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -455,6 +490,7 @@ pub fn run() {
             chat_stream_cmd,
             save_answer_to_wiki,
             update_memory_roll_up,
+            rollup_content_to_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
