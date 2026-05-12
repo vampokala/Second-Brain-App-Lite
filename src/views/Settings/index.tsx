@@ -55,7 +55,7 @@ function KeyRow({
       </div>
       {storedHint && (
         <p className="text-xs text-[var(--color-success)] flex items-center gap-1">
-          <CheckCircle2 size={11} /> Stored in keychain: {storedHint}
+          <CheckCircle2 size={11} /> Stored: {storedHint}
         </p>
       )}
       {hint && <p className="text-xs text-[var(--color-muted-foreground)]">{hint}</p>}
@@ -70,6 +70,7 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
   const [anthropicKey, setAnthropicKey] = useState('')
   const [geminiKey, setGeminiKey] = useState('')
   const [compatibleKey, setCompatibleKey] = useState('')
+  const [braveKey, setBraveKey] = useState('')
 
   if (!cfg) return <div className="flex items-center justify-center h-full text-[var(--color-muted-foreground)] text-sm">Loading…</div>
 
@@ -113,13 +114,13 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
     }
   }
 
-  const saveKey = async (provider: 'openai' | 'anthropic' | 'gemini' | 'compatible', secret: string, clear: () => void) => {
+  const saveKey = async (provider: 'openai' | 'anthropic' | 'gemini' | 'compatible' | 'brave', secret: string, clear: () => void) => {
     if (!secret.trim()) return
     try {
       await invoke('save_api_secret', { provider, secret: secret.trim() })
       clear()
       await refreshHints()
-      onBanner({ kind: 'success', text: `${provider} key saved to OS keychain.` })
+      onBanner({ kind: 'success', text: `${provider} key saved securely.` })
     } catch (e) {
       onBanner({ kind: 'error', text: String(e) })
     }
@@ -278,13 +279,22 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
       <Card>
         <CardHeader>
           <CardTitle>API Keys</CardTitle>
-          <CardDescription>Keys are stored in your OS keychain — never written to disk.</CardDescription>
+          <CardDescription>Keys are encrypted locally (app data) — never written to your vault.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <KeyRow label="OpenAI API key" value={openaiKey} onChange={setOpenaiKey} placeholder="sk-…" storedHint={hints.openai} onSave={() => saveKey('openai', openaiKey, () => setOpenaiKey(''))} />
           <KeyRow label="Anthropic API key" value={anthropicKey} onChange={setAnthropicKey} placeholder="sk-ant-…" storedHint={hints.anthropic} onSave={() => saveKey('anthropic', anthropicKey, () => setAnthropicKey(''))} />
           <KeyRow label="Gemini API key" value={geminiKey} onChange={setGeminiKey} placeholder="AIza…" storedHint={hints.gemini} onSave={() => saveKey('gemini', geminiKey, () => setGeminiKey(''))} />
           <KeyRow label="Compatible API key" value={compatibleKey} onChange={setCompatibleKey} placeholder="Bearer token or key" storedHint={hints.compatible} onSave={() => saveKey('compatible', compatibleKey, () => setCompatibleKey(''))} />
+          <KeyRow
+            label="Brave Search API key"
+            hint="Used when Chat enables “Web search”. Create a key at Brave Search API (developer dashboard)."
+            value={braveKey}
+            onChange={setBraveKey}
+            placeholder="BSA…"
+            storedHint={hints.brave}
+            onSave={() => saveKey('brave', braveKey, () => setBraveKey(''))}
+          />
         </CardContent>
       </Card>
     </div>

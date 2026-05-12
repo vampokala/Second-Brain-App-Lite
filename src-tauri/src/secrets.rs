@@ -193,3 +193,25 @@ pub fn resolve_compatible_key() -> Result<String> {
         "Compatible API key not set — add it in Settings → API Keys.",
     )
 }
+
+/// Brave Search API key for web-augmented chat. Optional unless chat requests web search.
+pub fn resolve_brave_search_key() -> Result<String> {
+    resolve(
+        "BRAVE_SEARCH_API_KEY",
+        "brave_search_api_key",
+        "Brave Search API key not set — add it in Settings → API Keys.",
+    )
+}
+
+pub fn brave_search_key_configured() -> bool {
+    if std::env::var("BRAVE_SEARCH_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    decrypt_map()
+        .ok()
+        .and_then(|m| m.get("brave_search_api_key").map(|s| !s.trim().is_empty()))
+        .unwrap_or(false)
+}

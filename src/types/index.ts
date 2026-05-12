@@ -16,6 +16,20 @@ export type AppConfig = {
   compatibleModel: string
   theme: string
   retrievalTrackFilter?: string | null
+  braveSearchCount?: number
+  braveFetchMaxUrls?: number
+  braveFetchTimeoutSecs?: number
+  bravePageMaxChars?: number
+  braveMaxBodyBytes?: number
+}
+
+export type ChatRetrievalMeta = {
+  wikiSourcesOnly: boolean
+  includeWebSearch: boolean
+  hitCount: number
+  maxScore: number
+  braveKeyConfigured: boolean
+  webPagesFetched: number
 }
 
 export type SessionFile = {

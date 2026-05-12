@@ -9,6 +9,8 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+.claude/
+.cursor/
 
 # Logs & debug
 *.log

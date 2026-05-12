@@ -9,6 +9,7 @@ mod paths;
 mod retrieval;
 mod secrets;
 mod sessions;
+mod web_compile;
 mod wiki;
 
 use config::{load_config, normalize_llm_provider, save_config, resolved_triple, AppConfig};
@@ -26,6 +27,14 @@ use uuid::Uuid;
 pub struct ChatStreamPayload {
     pub session_id: String,
     pub user_message: String,
+    #[serde(default = "default_true")]
+    pub wiki_sources_only: bool,
+    #[serde(default)]
+    pub include_web_search: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -113,6 +122,7 @@ fn save_api_secret(provider: String, secret: String) -> Result<(), String> {
         "anthropic" => "anthropic_api_key",
         "compatible" => "compatible_api_key",
         "gemini" => "gemini_api_key",
+        "brave" => "brave_search_api_key",
         _ => return Err("unknown provider".into()),
     };
     secrets::set_secret(account, &secret).map_err(|e| e.to_string())
@@ -125,6 +135,7 @@ fn api_secret_hint(provider: String) -> Result<Option<String>, String> {
         "anthropic" => "anthropic_api_key",
         "compatible" => "compatible_api_key",
         "gemini" => "gemini_api_key",
+        "brave" => "brave_search_api_key",
         _ => return Err("unknown provider".into()),
     };
     secrets::masked_hint(account).map_err(|e| e.to_string())
@@ -401,11 +412,33 @@ async fn chat_stream_cmd(
     chat::push_message(&mut sess, "user", payload.user_message.clone());
     save_session(&sess).map_err(|e| e.to_string())?;
 
+    let wiki_sources_only = payload.wiki_sources_only;
+    let include_web_search = payload.include_web_search;
+
+    if include_web_search && !secrets::brave_search_key_configured() {
+        let _ = app.emit(
+            "chat-token",
+            "\n\n__ERROR__Web search is on but no Brave Search API key is set — add it in Settings → API Keys."
+                .to_string(),
+        );
+        return Err("Brave Search API key not set".into());
+    }
+
     let mut assistant_buf = String::new();
-    let stream_result = chat::stream_session_chat(&cfg, &sess, payload.user_message.clone(), |delta| {
-        assistant_buf.push_str(&delta);
-        let _ = app.emit("chat-token", delta);
-    })
+    let stream_result = chat::stream_session_chat(
+        &cfg,
+        &sess,
+        payload.user_message.clone(),
+        wiki_sources_only,
+        include_web_search,
+        |meta| {
+            let _ = app.emit("chat-retrieval-meta", meta);
+        },
+        |delta| {
+            assistant_buf.push_str(&delta);
+            let _ = app.emit("chat-token", delta);
+        },
+    )
     .await;
 
     if let Err(e) = stream_result {

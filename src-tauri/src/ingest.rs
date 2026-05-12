@@ -467,20 +467,26 @@ fn slug_from_url(url: &str) -> String {
         .collect::<String>()
 }
 
-pub async fn save_url_to_raw(
-    cfg: &AppConfig,
+/// Fetch a URL and return `(title, plain_text)` with HTML stripped.
+/// **No SSRF policy** — only use with URLs you trust (e.g. user-pasted ingest). For Brave result URLs, validate first.
+pub async fn fetch_url_plain_excerpt(
     url: &str,
-    stem_opt: Option<&str>,
-    track_opt: Option<&str>,
-) -> Result<String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
+    timeout: std::time::Duration,
+    max_body_bytes: usize,
+    max_chars: usize,
+) -> Result<(String, String)> {
+    let client = reqwest::Client::builder().timeout(timeout).build()?;
     let res = client.get(url).send().await.context("fetch url")?;
     if !res.status().is_success() {
         anyhow::bail!("fetch failed with status {}", res.status());
     }
-    let body = res.text().await.context("read url body")?;
+    let body_bytes = res.bytes().await.context("read url body")?;
+    let slice: &[u8] = if body_bytes.len() > max_body_bytes {
+        &body_bytes[..max_body_bytes]
+    } else {
+        &body_bytes
+    };
+    let body = String::from_utf8_lossy(slice);
     let title_re = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("title regex");
     let title = title_re
         .captures(&body)
@@ -488,7 +494,25 @@ pub async fn save_url_to_raw(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Web Article".into());
     let cleaned = crate::extract::extract_plain_text(Path::new("page.html"), body.as_bytes())
-        .unwrap_or_else(|_| body.clone());
+        .unwrap_or_else(|_| body.into_owned());
+    let excerpt: String = cleaned.chars().take(max_chars).collect();
+    Ok((title, excerpt))
+}
+
+pub async fn save_url_to_raw(
+    cfg: &AppConfig,
+    url: &str,
+    stem_opt: Option<&str>,
+    track_opt: Option<&str>,
+) -> Result<String> {
+    let (title, cleaned) = fetch_url_plain_excerpt(
+        url,
+        std::time::Duration::from_secs(20),
+        5_000_000,
+        2_000_000,
+    )
+    .await
+    .context("fetch url")?;
 
     let mut stem = stem_opt
         .map(slugify_paste_stem)
