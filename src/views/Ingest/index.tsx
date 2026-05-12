@@ -99,6 +99,8 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
   }
 
   const handleStopIngest = async () => {
+    const shouldStop = window.confirm('Stop ingest now? You can restart it anytime.')
+    if (!shouldStop) return
     try {
       await cancelIngest()
       onBanner({ kind: 'success', text: 'Stopping ingest…' })
