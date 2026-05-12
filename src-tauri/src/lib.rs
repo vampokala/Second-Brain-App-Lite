@@ -17,10 +17,19 @@ use ingest::{run_ingest, FileIngestResult, IngestProgressPayload, TrackInference
 use serde::Deserialize;
 use sessions::{delete_session, list_sessions, load_session, save_session, SessionFile};
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
+
+#[derive(Default)]
+struct IngestRunState {
+    cancel_flag: Mutex<Option<Arc<AtomicBool>>>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +179,7 @@ async fn fetch_ollama_models(base_url: String) -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn run_ingest_cmd(
     app: tauri::AppHandle,
+    ingest_state: tauri::State<'_, IngestRunState>,
     cfg: AppConfig,
     full_tier: bool,
     track_id: Option<String>,
@@ -178,11 +188,23 @@ async fn run_ingest_cmd(
         .as_deref()
         .map(ingest::sanitize_track_id)
         .filter(|s| !s.is_empty());
-    run_ingest(&cfg, full_tier, track.as_deref(), |progress| {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = ingest_state
+            .cancel_flag
+            .lock()
+            .map_err(|_| "failed to lock ingest state".to_string())?;
+        *slot = Some(cancel_flag.clone());
+    }
+    let out = run_ingest(&cfg, full_tier, track.as_deref(), |progress| {
         let _ = app.emit("ingest-progress", progress);
-    })
+    }, || cancel_flag.load(Ordering::Relaxed))
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    if let Ok(mut slot) = ingest_state.cancel_flag.lock() {
+        *slot = None;
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +243,7 @@ pub struct InferTrackPayload {
 #[tauri::command]
 async fn ingest_pasted_text_cmd(
     app: tauri::AppHandle,
+    ingest_state: tauri::State<'_, IngestRunState>,
     cfg: AppConfig,
     full_tier: bool,
     payload: IngestPastePayload,
@@ -278,16 +301,29 @@ async fn ingest_pasted_text_cmd(
             relative_path: Some(rel),
         },
     );
-    run_ingest(&cfg, full_tier, None, |progress| {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = ingest_state
+            .cancel_flag
+            .lock()
+            .map_err(|_| "failed to lock ingest state".to_string())?;
+        *slot = Some(cancel_flag.clone());
+    }
+    let out = run_ingest(&cfg, full_tier, None, |progress| {
         let _ = app.emit("ingest-progress", progress);
-    })
+    }, || cancel_flag.load(Ordering::Relaxed))
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    if let Ok(mut slot) = ingest_state.cancel_flag.lock() {
+        *slot = None;
+    }
+    out
 }
 
 #[tauri::command]
 async fn ingest_url_cmd(
     app: tauri::AppHandle,
+    ingest_state: tauri::State<'_, IngestRunState>,
     cfg: AppConfig,
     full_tier: bool,
     payload: IngestUrlPayload,
@@ -349,11 +385,37 @@ async fn ingest_url_cmd(
             relative_path: Some(rel),
         },
     );
-    run_ingest(&cfg, full_tier, None, |progress| {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = ingest_state
+            .cancel_flag
+            .lock()
+            .map_err(|_| "failed to lock ingest state".to_string())?;
+        *slot = Some(cancel_flag.clone());
+    }
+    let out = run_ingest(&cfg, full_tier, None, |progress| {
         let _ = app.emit("ingest-progress", progress);
-    })
+    }, || cancel_flag.load(Ordering::Relaxed))
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    if let Ok(mut slot) = ingest_state.cancel_flag.lock() {
+        *slot = None;
+    }
+    out
+}
+
+#[tauri::command]
+fn cancel_ingest_cmd(ingest_state: tauri::State<'_, IngestRunState>) -> Result<(), String> {
+    let slot = ingest_state
+        .cancel_flag
+        .lock()
+        .map_err(|_| "failed to lock ingest state".to_string())?;
+    if let Some(flag) = slot.as_ref() {
+        flag.store(true, Ordering::Relaxed);
+        Ok(())
+    } else {
+        Err("No ingest is currently running.".into())
+    }
 }
 
 #[tauri::command]
@@ -593,7 +655,7 @@ async fn update_memory_roll_up(cfg: AppConfig, session_id: String) -> Result<(),
     ];
 
     let provider = normalize_llm_provider(&cfg.default_provider);
-    let out = llm::complete_chat(&provider, &cfg, &messages)
+    let out = llm::complete_chat(&provider, &cfg, &messages, Default::default())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -628,7 +690,7 @@ async fn rollup_content_to_memory(cfg: AppConfig, content: String) -> Result<(),
     ];
 
     let provider = normalize_llm_provider(&cfg.default_provider);
-    let out = llm::complete_chat(&provider, &cfg, &messages)
+    let out = llm::complete_chat(&provider, &cfg, &messages, Default::default())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -644,6 +706,7 @@ async fn rollup_content_to_memory(cfg: AppConfig, content: String) -> Result<(),
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(IngestRunState::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -668,6 +731,7 @@ pub fn run() {
             run_ingest_cmd,
             ingest_pasted_text_cmd,
             ingest_url_cmd,
+            cancel_ingest_cmd,
             list_tracks_cmd,
             infer_track_cmd,
             list_chat_sessions,

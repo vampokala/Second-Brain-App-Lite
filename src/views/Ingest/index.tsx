@@ -16,12 +16,12 @@ type Banner = { kind: 'success' | 'error'; text: string } | null
 
 function StatusIcon({ status }: { status: string }) {
   if (status === 'ok') return <CheckCircle2 size={14} className="text-[var(--color-success)] shrink-0" />
-  if (status === 'skipped') return <SkipForward size={14} className="text-[var(--color-muted-foreground)] shrink-0" />
+  if (status === 'skipped' || status === 'cancelled') return <SkipForward size={14} className="text-[var(--color-muted-foreground)] shrink-0" />
   return <XCircle size={14} className="text-[var(--color-destructive)] shrink-0" />
 }
 
 export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; onBanner: (b: Banner) => void }) {
-  const { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack } = useIngest()
+  const { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack, cancelIngest } = useIngest()
   const [fullTier, setFullTier] = useState(false)
   const [pasteTitle, setPasteTitle] = useState('')
   const [pasteBody, setPasteBody] = useState('')
@@ -98,6 +98,15 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
     }
   }
 
+  const handleStopIngest = async () => {
+    try {
+      await cancelIngest()
+      onBanner({ kind: 'success', text: 'Stopping ingest…' })
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    }
+  }
+
   const handlePasteIngest = async () => {
     if (!pasteBody.trim()) { onBanner({ kind: 'error', text: 'Enter some text to ingest.' }); return }
     if (!maybeWarnLowConfidence()) return
@@ -136,7 +145,7 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-6 flex flex-col gap-5">
+    <div className="w-full px-6 py-6 flex flex-col gap-5">
       <div>
         <h1 className="text-lg font-semibold text-[var(--color-foreground)]">Ingest</h1>
         <p className="text-sm text-[var(--color-muted-foreground)] mt-0.5">
@@ -155,6 +164,11 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
               {busy ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
               {busy ? 'Ingesting…' : 'Run full ingest'}
             </Button>
+            {busy && (
+              <Button variant="destructive" onClick={handleStopIngest}>
+                Stop ingest
+              </Button>
+            )}
             <Button variant="secondary" onClick={() => setShowPaste(!showPaste)} disabled={busy}>
               {showPaste ? 'Hide paste' : 'Paste & ingest'}
             </Button>
@@ -323,7 +337,7 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
                   <tr key={r.relativeRawPath} className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-muted)] transition-colors">
                     <td className="px-4 py-2"><StatusIcon status={r.status} /></td>
                     <td className="px-4 py-2 font-mono text-[var(--color-foreground)]">{r.relativeRawPath}</td>
-                    <td className={cn('px-4 py-2 font-medium', r.status === 'ok' ? 'text-[var(--color-success)]' : r.status === 'skipped' ? 'text-[var(--color-muted-foreground)]' : 'text-[var(--color-destructive)]')}>
+                    <td className={cn('px-4 py-2 font-medium', r.status === 'ok' ? 'text-[var(--color-success)]' : r.status === 'skipped' || r.status === 'cancelled' ? 'text-[var(--color-muted-foreground)]' : 'text-[var(--color-destructive)]')}>
                       {r.status}
                     </td>
                     <td className="px-4 py-2 text-[var(--color-muted-foreground)]">{r.detail ?? ''}</td>
