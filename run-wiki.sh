@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Always run from the directory that contains this script (works from Finder, symlinks, etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
 BROWSER_URL="http://localhost:1420"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -23,27 +27,21 @@ run_browser_mode() {
   exit $?
 }
 
-# ── Node.js check ─────────────────────────────────────────────────────────────
+# After Tauri exits non-zero: only fall back to browser for likely runtime / firewall / WebView issues.
+should_fallback_after_tauri() {
+  local code=$1
+  case $code in
+    0) return 1 ;;
+    101) return 1 ;;   # cargo / rustc compile error — fix code, do not mask with browser
+    130|143) return 1 ;; # user interrupt
+  esac
+  return 0
+}
 
-if ! command -v node &>/dev/null; then
-  echo "ERROR: Node.js is not installed."
-  echo "  Download it from https://nodejs.org (LTS version recommended)."
+# ── Dependencies (npm + optional Rust prefetch) ───────────────────────────────
+
+if ! bash "$SCRIPT_DIR/scripts/install-deps.sh" --allow-partial-npm; then
   exit 1
-fi
-echo "Node $(node -v) detected."
-
-# ── npm install ───────────────────────────────────────────────────────────────
-
-if [ ! -d "node_modules" ] || [ "package-lock.json" -nt "node_modules/.package-lock.json" ]; then
-  echo "Installing npm packages..."
-  if ! npm install; then
-    echo ""
-    echo "ERROR: npm install failed."
-    echo "  Check your network connection or proxy settings and try again."
-    exit 1
-  fi
-else
-  echo "Dependencies up to date, skipping npm install."
 fi
 
 # ── Tauri desktop mode (requires Rust / cargo) ────────────────────────────────
@@ -56,17 +54,21 @@ if command -v cargo &>/dev/null; then
   npm run tauri:dev
   TAURI_EXIT=$?
 
-  # Exit 0 = user closed the window normally — don't fall back
-  if [ $TAURI_EXIT -eq 0 ]; then
+  if [ "$TAURI_EXIT" -eq 0 ]; then
     exit 0
+  fi
+
+  if ! should_fallback_after_tauri "$TAURI_EXIT"; then
+    if [ "$TAURI_EXIT" -eq 101 ]; then
+      echo ""
+      echo "Rust build failed (exit 101). Fix the errors above."
+    fi
+    exit "$TAURI_EXIT"
   fi
 
   echo ""
   echo "WARNING: Tauri exited with code $TAURI_EXIT."
-  echo "  This can happen due to a firewall blocking localhost, a missing"
-  echo "  WebView runtime, or a network error while downloading Rust crates."
-  echo ""
-  echo "Falling back to browser mode..."
+  echo "  Falling back to browser mode (often caused by firewall, WebView, or localhost)."
   run_browser_mode
 
 else
@@ -74,6 +76,6 @@ else
   echo "Rust / cargo not found — Tauri desktop mode is unavailable."
   echo "  Install Rust at https://rustup.rs for the full desktop experience."
   echo ""
-  echo "Falling back to browser mode..."
+  echo "Starting browser mode..."
   run_browser_mode
 fi

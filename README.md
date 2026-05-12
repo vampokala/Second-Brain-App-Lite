@@ -159,6 +159,13 @@ cd Second-Brain-App-Lite
 npm install
 ```
 
+You can also install **npm packages and prefetch Rust crates** in one step (useful for CI, Docker, or warming caches before `tauri dev`):
+
+- **macOS / Linux:** `./scripts/install-deps.sh` (see `./scripts/install-deps.sh --help` for `--npm-only` / `--rust-only`)
+- **Windows:** `scripts\install-deps.bat`
+
+The **`run-wiki.sh`** / **`run-wiki.bat`** launchers call this automatically, then start Tauri or browser mode.
+
 ### 2 — Run in development
 
 ```bash
