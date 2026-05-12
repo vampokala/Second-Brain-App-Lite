@@ -11,6 +11,13 @@ pub struct LlmMessage {
     pub content: String,
 }
 
+/// Options for non-streaming chat completion.
+#[derive(Debug, Clone, Default)]
+pub struct ChatCompleteOptions {
+    /// When true, providers that support it constrain the assistant message to JSON (used for ingest).
+    pub json_response: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAiChoiceMsg {
     content: Option<String>,
@@ -64,27 +71,42 @@ async fn blocking_secret<R: Send + 'static>(
         .map_err(|e| anyhow!("API key resolve task failed: {}", e))?
 }
 
-pub async fn complete_chat(provider: &str, cfg: &AppConfig, messages: &[LlmMessage]) -> Result<String> {
+pub async fn complete_chat(
+    provider: &str,
+    cfg: &AppConfig,
+    messages: &[LlmMessage],
+    opts: ChatCompleteOptions,
+) -> Result<String> {
     match provider {
-        "ollama" => ollama_complete(cfg, messages, false).await,
-        "openai" => openai_complete(cfg, messages, false).await,
+        "ollama" => ollama_complete(cfg, messages, false, opts.json_response).await,
+        "openai" => openai_complete(cfg, messages, false, opts.json_response).await,
         "anthropic" => anthropic_complete(cfg, messages).await,
-        "compatible" => openai_compatible_complete(cfg, messages, false).await,
-        "gemini" => gemini_complete(cfg, messages).await,
+        "compatible" => openai_compatible_complete(cfg, messages, false, opts.json_response).await,
+        "gemini" => gemini_complete(cfg, messages, opts.json_response).await,
         _ => Err(anyhow!("unknown provider {}", provider)),
     }
 }
 
-async fn ollama_complete(cfg: &AppConfig, messages: &[LlmMessage], stream: bool) -> Result<String> {
+async fn ollama_complete(
+    cfg: &AppConfig,
+    messages: &[LlmMessage],
+    stream: bool,
+    json_response: bool,
+) -> Result<String> {
     let url = format!(
         "{}/api/chat",
         cfg.ollama_base_url.trim_end_matches('/')
     );
-    let body = json!({
+    let mut body = json!({
       "model": cfg.ollama_model,
       "messages": messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect::<Vec<_>>(),
       "stream": stream,
     });
+    if json_response {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("format".into(), json!("json"));
+        }
+    }
     let c = client()?;
     let res = c.post(&url).json(&body).send().await?;
     if !res.status().is_success() {
@@ -95,15 +117,28 @@ async fn ollama_complete(cfg: &AppConfig, messages: &[LlmMessage], stream: bool)
     Ok(v.message.content)
 }
 
-async fn openai_complete(cfg: &AppConfig, messages: &[LlmMessage], stream: bool) -> Result<String> {
+async fn openai_complete(
+    cfg: &AppConfig,
+    messages: &[LlmMessage],
+    stream: bool,
+    json_response: bool,
+) -> Result<String> {
     let key = blocking_secret(|| secrets::resolve_openai_key()).await?;
     let url = "https://api.openai.com/v1/chat/completions";
-    let body = json!({
+    let mut body = json!({
       "model": openai_chat_model_for_api(&cfg.openai_model),
       "messages": messages,
       "temperature": 0.2,
       "stream": stream,
     });
+    if json_response {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "response_format".into(),
+                json!({ "type": "json_object" }),
+            );
+        }
+    }
     let c = client()?;
     let res = c
         .post(url)
@@ -126,16 +161,25 @@ async fn openai_compatible_complete(
     cfg: &AppConfig,
     messages: &[LlmMessage],
     stream: bool,
+    json_response: bool,
 ) -> Result<String> {
     let key = blocking_secret(|| secrets::resolve_compatible_key()).await?;
     let base = cfg.compatible_base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
-    let body = json!({
+    let mut body = json!({
       "model": openai_chat_model_for_api(&cfg.compatible_model),
       "messages": messages,
       "temperature": 0.2,
       "stream": stream,
     });
+    if json_response {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "response_format".into(),
+                json!({ "type": "json_object" }),
+            );
+        }
+    }
     let c = client()?;
     let res = c.post(&url).bearer_auth(key).json(&body).send().await?;
     if !res.status().is_success() {
@@ -245,7 +289,11 @@ fn gemini_model_for_api(raw: &str) -> String {
     }
 }
 
-async fn gemini_complete(cfg: &AppConfig, messages: &[LlmMessage]) -> Result<String> {
+async fn gemini_complete(
+    cfg: &AppConfig,
+    messages: &[LlmMessage],
+    json_response: bool,
+) -> Result<String> {
     let key = blocking_secret(|| secrets::resolve_gemini_key()).await?;
     let base = cfg.gemini_base_url.trim_end_matches('/');
     let model = gemini_model_for_api(&cfg.gemini_model);
@@ -272,6 +320,12 @@ async fn gemini_complete(cfg: &AppConfig, messages: &[LlmMessage]) -> Result<Str
         body_map.insert(
             "systemInstruction".into(),
             json!({ "parts": [{ "text": sys }] }),
+        );
+    }
+    if json_response {
+        body_map.insert(
+            "generationConfig".into(),
+            json!({ "responseMimeType": "application/json" }),
         );
     }
     let body = serde_json::Value::Object(body_map);
@@ -352,7 +406,7 @@ where
         "openai" => stream_openai_like(cfg, messages, true, &None, on_delta).await,
         "compatible" => stream_openai_like(cfg, messages, false, &Some(cfg.compatible_base_url.clone()), on_delta).await,
         "gemini" => {
-            let full = gemini_complete(cfg, messages).await?;
+            let full = gemini_complete(cfg, messages, false).await?;
             on_delta(full);
             Ok(())
         }

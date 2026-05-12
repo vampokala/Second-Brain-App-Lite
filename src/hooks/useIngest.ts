@@ -114,5 +114,12 @@ export function useIngest() {
     [],
   )
 
-  return { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack }
+  const cancelIngest = useCallback(
+    async (): Promise<void> => {
+      await invoke('cancel_ingest_cmd')
+    },
+    [],
+  )
+
+  return { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack, cancelIngest }
 }

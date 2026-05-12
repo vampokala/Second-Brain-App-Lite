@@ -111,7 +111,7 @@ export default function ChatView({ cfg, activeSessionId, setActiveSessionId, onB
   const hasMessages = (activeSession?.messages.length ?? 0) > 0 || streamTail
 
   return (
-    <div className="flex flex-col h-full max-w-3xl mx-auto w-full px-4">
+    <div className="flex flex-col h-full w-full px-4 lg:px-6">
       {/* Session title */}
       <div className="py-3 border-b border-[var(--color-border)] shrink-0">
         <p className="text-sm font-medium text-[var(--color-foreground)]">{activeSession?.title ?? 'Chat'}</p>

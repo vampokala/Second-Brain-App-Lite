@@ -2,6 +2,7 @@
 setlocal EnableDelayedExpansion
 
 :: Install npm packages and optionally prefetch Rust crates.
+:: Python is not required for this project (Node.js + Rust/Tauri only).
 ::   scripts\install-deps.bat
 ::   scripts\install-deps.bat --npm-only
 ::   scripts\install-deps.bat --rust-only

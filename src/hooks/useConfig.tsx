@@ -1,8 +1,23 @@
-import { invoke } from '@tauri-apps/api/core'
-import { useCallback, useEffect, useState } from 'react'
 import type { AppConfig, SchemaStatus } from '@/types'
+import { invoke } from '@tauri-apps/api/core'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
-export function useConfig() {
+type ConfigContextValue = {
+  cfg: AppConfig | null
+  setCfg: React.Dispatch<React.SetStateAction<AppConfig | null>>
+  patchCfg: (partial: Partial<AppConfig>) => void
+  persistCfg: (next: AppConfig) => Promise<void>
+  schemaStatus: SchemaStatus | null
+  platformOs: string
+  hints: Record<string, string | undefined>
+  refreshHints: () => Promise<void>
+  refreshSchema: (c: AppConfig) => Promise<void>
+  error: string | null
+}
+
+const ConfigContext = createContext<ConfigContextValue | null>(null)
+
+export function ConfigProvider({ children }: { children: ReactNode }) {
   const [cfg, setCfg] = useState<AppConfig | null>(null)
   const [schemaStatus, setSchemaStatus] = useState<SchemaStatus | null>(null)
   const [platformOs, setPlatformOs] = useState<string>('')
@@ -25,11 +40,16 @@ export function useConfig() {
         compatible: c ?? undefined,
         brave: b ?? undefined,
       })
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, [])
 
   const refreshSchema = useCallback(async (c: AppConfig) => {
-    if (!c.schemaDir) { setSchemaStatus(null); return }
+    if (!c.schemaDir) {
+      setSchemaStatus(null)
+      return
+    }
     try {
       const st = await invoke<SchemaStatus>('read_schema_status', { schemaDir: c.schemaDir })
       setSchemaStatus(st)
@@ -49,14 +69,42 @@ export function useConfig() {
       .catch(() => setError('Could not load configuration.'))
   }, [refreshHints, refreshSchema])
 
-  const patchCfg = (partial: Partial<AppConfig>) =>
+  const patchCfg = useCallback((partial: Partial<AppConfig>) => {
     setCfg((prev) => (prev ? { ...prev, ...partial } : prev))
+  }, [])
 
-  const persistCfg = async (next: AppConfig): Promise<void> => {
-    await invoke('save_app_config', { cfg: next })
-    setCfg(next)
-    refreshSchema(next)
+  const persistCfg = useCallback(
+    async (next: AppConfig): Promise<void> => {
+      await invoke('save_app_config', { cfg: next })
+      setCfg(next)
+      refreshSchema(next)
+    },
+    [refreshSchema],
+  )
+
+  const value = useMemo<ConfigContextValue>(
+    () => ({
+      cfg,
+      setCfg,
+      patchCfg,
+      persistCfg,
+      schemaStatus,
+      platformOs,
+      hints,
+      refreshHints,
+      refreshSchema,
+      error,
+    }),
+    [cfg, patchCfg, persistCfg, schemaStatus, platformOs, hints, refreshHints, refreshSchema, error],
+  )
+
+  return <ConfigContext.Provider value={value}>{children}</ConfigContext.Provider>
+}
+
+export function useConfig(): ConfigContextValue {
+  const ctx = useContext(ConfigContext)
+  if (!ctx) {
+    throw new Error('useConfig must be used within ConfigProvider')
   }
-
-  return { cfg, setCfg, patchCfg, persistCfg, schemaStatus, platformOs, hints, refreshHints, refreshSchema, error }
+  return ctx
 }

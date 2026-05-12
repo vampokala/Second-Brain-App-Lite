@@ -4,6 +4,9 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
+# Prune stale Cargo/npm log-like files under src-tauri/target (see scripts/cleanup-old-target-logs.*).
+bash "$SCRIPT_DIR/scripts/cleanup-old-target-logs.sh"
+
 BROWSER_URL="http://localhost:1420"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

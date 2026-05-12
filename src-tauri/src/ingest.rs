@@ -2,7 +2,8 @@
 
 use crate::atomic;
 use crate::config::{normalize_llm_provider, resolved_triple, AppConfig};
-use crate::llm::{complete_chat, LlmMessage};
+use crate::llm::{complete_chat, ChatCompleteOptions, LlmMessage};
+use base64::Engine as _;
 use crate::manifest::{sha256_bytes, ManifestEntry};
 use crate::wiki;
 use anyhow::{Context, Result};
@@ -34,8 +35,12 @@ pub struct IngestLlmJson {
     pub title: String,
     #[serde(alias = "oneLineSummary")]
     pub one_line_summary: String,
-    #[serde(alias = "bodyMarkdown")]
+    /// Wiki body when short; large bodies should use `body_markdown_b64` instead.
+    #[serde(default, alias = "bodyMarkdown")]
     pub body_markdown: String,
+    /// Base64 (standard alphabet) of UTF-8 markdown body — avoids invalid JSON from code fences/quotes.
+    #[serde(default, alias = "bodyMarkdownB64")]
+    pub body_markdown_b64: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default, alias = "glossaryPatch")]
@@ -137,6 +142,22 @@ fn parse_ingest_json(raw: &str) -> Result<IngestLlmJson> {
             "parse ingest JSON from model: no JSON object found"
         )),
     }
+}
+
+fn resolve_ingest_body(parsed: &IngestLlmJson) -> Result<String> {
+    if let Some(ref b64) = parsed.body_markdown_b64 {
+        let compact: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+        if !compact.is_empty() {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(compact.as_bytes())
+                .context("decode body_markdown_b64")?;
+            return String::from_utf8(bytes).context("body_markdown_b64 is not valid UTF-8");
+        }
+    }
+    if !parsed.body_markdown.trim().is_empty() {
+        return Ok(parsed.body_markdown.clone());
+    }
+    anyhow::bail!("model returned empty body: set body_markdown_b64 (preferred) or body_markdown");
 }
 
 fn kebab_slug(path: &Path) -> String {
@@ -542,14 +563,16 @@ pub async fn save_url_to_raw(
     Ok(format!("{track}/web/{stem}.md"))
 }
 
-pub async fn run_ingest<F>(
+pub async fn run_ingest<F, C>(
     cfg: &AppConfig,
     full_tier: bool,
     track_filter: Option<&str>,
     mut on_progress: F,
+    should_cancel: C,
 ) -> Result<Vec<FileIngestResult>>
 where
     F: FnMut(IngestProgressPayload) + Send,
+    C: Fn() -> bool + Send,
 {
     let (raw_dir, wiki_dir, schema_dir) = resolved_triple(cfg)?;
     let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
@@ -612,7 +635,25 @@ where
         relative_path: None,
     });
 
+    let mut cancelled = false;
     for (idx, path) in raw_paths.iter().enumerate() {
+        if should_cancel() {
+            cancelled = true;
+            on_progress(IngestProgressPayload {
+                phase: "cancelled".into(),
+                message: "Ingest stopped by user request.".into(),
+                current: Some(idx as u32),
+                total: Some(total_n),
+                relative_path: None,
+            });
+            results.push(FileIngestResult {
+                relative_raw_path: "(ingest)".into(),
+                status: "cancelled".into(),
+                detail: Some("Stopped by user request".into()),
+            });
+            break;
+        }
+
         let current_i = (idx + 1) as u32;
         let rel = path
             .strip_prefix(&raw_dir)
@@ -717,7 +758,7 @@ where
             .map(|t| format!("Track namespace: {t}. Keep this identity explicit in title/body and include tag track:{t}."))
             .unwrap_or_else(|| "Track namespace: unknown/inbox. Infer a concise domain tag when obvious.".into());
         let sys = format!(
-            "{}\n\nYou output ONLY valid JSON (no markdown fences). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown (markdown body WITHOUT YAML frontmatter), tags (string array), glossary_patch (string or empty).\n\n{}\n{}",
+            "{}\n\nYou output ONLY valid JSON (no markdown fences). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown_b64 (REQUIRED: standard Base64 of UTF-8 for the wiki markdown body WITHOUT YAML frontmatter — use this for the full body so JSON stays valid), body_markdown (optional; only if body is tiny with no quotes or code fences), tags (string array), glossary_patch (string or empty).\n\n{}\n{}",
             tier_hint,
             "Integrate with existing wiki style per schema.",
             track_hint
@@ -752,11 +793,21 @@ where
             relative_path: Some(rel.clone()),
         });
 
-        let parsed = match complete_chat(&provider, cfg, &messages).await {
+        let parsed = match complete_chat(
+            &provider,
+            cfg,
+            &messages,
+            ChatCompleteOptions {
+                json_response: true,
+            },
+        )
+        .await
+        {
             Ok(raw) => match parse_ingest_json(&raw) {
                 Ok(p) => p,
                 Err(e) => {
-                    let detail = format!("LLM JSON: {}", e);
+                    let snippet: String = raw.chars().take(500).collect();
+                    let detail = format!("LLM JSON: {}; model output (truncated): {}", e, snippet);
                     on_progress(IngestProgressPayload {
                         phase: "error".into(),
                         message: detail.clone(),
@@ -774,6 +825,26 @@ where
             },
             Err(e) => {
                 let detail = format!("LLM: {}", e);
+                on_progress(IngestProgressPayload {
+                    phase: "error".into(),
+                    message: detail.clone(),
+                    current: Some(current_i),
+                    total: Some(total_n),
+                    relative_path: Some(rel.clone()),
+                });
+                results.push(FileIngestResult {
+                    relative_raw_path: rel.clone(),
+                    status: "error".into(),
+                    detail: Some(detail),
+                });
+                continue;
+            }
+        };
+
+        let body_markdown = match resolve_ingest_body(&parsed) {
+            Ok(b) => b,
+            Err(e) => {
+                let detail = format!("ingest body: {}", e);
                 on_progress(IngestProgressPayload {
                     phase: "error".into(),
                     message: detail.clone(),
@@ -823,7 +894,7 @@ where
             }
         };
 
-        let page = format!("{}{}", fm, parsed.body_markdown);
+        let page = format!("{}{}", fm, body_markdown);
         let track_folder = track_id.clone().unwrap_or_else(|| "inbox".into());
         let sources_dir = wiki_dir.join("sources").join(&track_folder);
         std::fs::create_dir_all(&sources_dir)?;
@@ -936,11 +1007,18 @@ where
     let err_n = results.iter().filter(|r| r.status == "error").count();
     let skip_n = results.iter().filter(|r| r.status == "skipped").count();
     on_progress(IngestProgressPayload {
-        phase: "complete".into(),
-        message: format!(
-            "Finished — ok: {}, skipped: {}, errors: {}; manifest saved",
-            ok_n, skip_n, err_n
-        ),
+        phase: if cancelled { "cancelled" } else { "complete" }.into(),
+        message: if cancelled {
+            format!(
+                "Stopped — ok: {}, skipped: {}, errors: {}; partial manifest saved",
+                ok_n, skip_n, err_n
+            )
+        } else {
+            format!(
+                "Finished — ok: {}, skipped: {}, errors: {}; manifest saved",
+                ok_n, skip_n, err_n
+            )
+        },
         current: None,
         total: Some(total_n),
         relative_path: None,
@@ -952,6 +1030,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_ingest_prefers_body_markdown_b64() {
+        let body = "## Title\n```yaml\nx: 1\n```\n";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
+        let raw = format!(
+            r#"{{"slug":"s","title":"T","one_line_summary":"S","body_markdown":"ignored","body_markdown_b64":"{}","tags":[]}}"#,
+            b64
+        );
+        let v = parse_ingest_json(&raw).unwrap();
+        assert_eq!(resolve_ingest_body(&v).unwrap(), body);
+    }
 
     #[test]
     fn parse_ingest_accepts_snake_case_keys_from_prompt() {

@@ -4,6 +4,11 @@ setlocal EnableDelayedExpansion
 :: Always run from the directory that contains this script (cmd shortcuts, other CWD)
 cd /d "%~dp0" || exit /b 1
 
+:: Prune stale Cargo/npm log-like files under src-tauri\target (see scripts\cleanup-old-target-logs.ps1).
+if not "%RUN_WIKI_SKIP_TARGET_CLEANUP%"=="1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\cleanup-old-target-logs.ps1"
+)
+
 set BROWSER_URL=http://localhost:1420
 
 :: ── Dependencies (npm + optional Rust prefetch) ───────────────────────────────

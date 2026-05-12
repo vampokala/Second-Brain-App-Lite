@@ -64,7 +64,7 @@ function KeyRow({
 }
 
 export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => void }) {
-  const { cfg, patchCfg, persistCfg, schemaStatus, platformOs, hints, refreshHints, refreshSchema } = useConfig()
+  const { cfg, patchCfg, setCfg, persistCfg, schemaStatus, platformOs, hints, refreshHints, refreshSchema } = useConfig()
 
   const [openaiKey, setOpenaiKey] = useState('')
   const [anthropicKey, setAnthropicKey] = useState('')
@@ -72,7 +72,18 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
   const [compatibleKey, setCompatibleKey] = useState('')
   const [braveKey, setBraveKey] = useState('')
 
-  if (!cfg) return <div className="flex items-center justify-center h-full text-[var(--color-muted-foreground)] text-sm">Loading…</div>
+  const [openaiListed, setOpenaiListed] = useState<string[]>([])
+  const [anthropicListed, setAnthropicListed] = useState<string[]>([])
+  const [geminiListed, setGeminiListed] = useState<string[]>([])
+  const [listingRemote, setListingRemote] = useState<null | 'openai' | 'anthropic' | 'gemini'>(null)
+
+  if (!cfg) {
+    return (
+      <div className="flex min-h-full w-full items-center justify-center px-4 text-[var(--color-muted-foreground)] text-sm lg:px-6">
+        Loading…
+      </div>
+    )
+  }
 
   const osHelp =
     cfg.osHint === 'windows'
@@ -137,6 +148,54 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
     }
   }
 
+  const listRemoteModels = async (which: 'openai' | 'anthropic' | 'gemini') => {
+    setListingRemote(which)
+    try {
+      if (which === 'openai') {
+        const models = await invoke<string[]>('fetch_openai_models')
+        setOpenaiListed(models)
+        setCfg((prev) => {
+          if (!prev || !models.length) return prev
+          if (models.includes(prev.openaiModel)) return prev
+          return { ...prev, openaiModel: models[0] }
+        })
+        onBanner({
+          kind: 'success',
+          text: models.length ? `OpenAI: loaded ${models.length} chat-capable models (filtered).` : 'OpenAI returned no matching models.',
+        })
+      } else if (which === 'anthropic') {
+        const models = await invoke<string[]>('fetch_anthropic_models')
+        setAnthropicListed(models)
+        setCfg((prev) => {
+          if (!prev || !models.length) return prev
+          if (models.includes(prev.anthropicModel)) return prev
+          return { ...prev, anthropicModel: models[0] }
+        })
+        onBanner({
+          kind: 'success',
+          text: models.length ? `Anthropic: loaded ${models.length} models.` : 'Anthropic returned no models.',
+        })
+      } else {
+        const models = await invoke<string[]>('fetch_gemini_models', { geminiBaseUrl: cfg.geminiBaseUrl ?? '' })
+        setGeminiListed(models)
+        setCfg((prev) => {
+          if (!prev || !models.length) return prev
+          const cur = prev.geminiModel ?? ''
+          if (models.includes(cur)) return prev
+          return { ...prev, geminiModel: models[0] }
+        })
+        onBanner({
+          kind: 'success',
+          text: models.length ? `Gemini: loaded ${models.length} generateContent models.` : 'Gemini returned no models.',
+        })
+      }
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    } finally {
+      setListingRemote(null)
+    }
+  }
+
   const handleSave = async () => {
     try {
       await persistCfg(cfg)
@@ -147,7 +206,7 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
   }
 
   return (
-    <div className="max-w-2xl mx-auto px-6 py-6 flex flex-col gap-5">
+    <div className="flex min-h-full w-full flex-col gap-5 px-4 py-6 box-border lg:px-6">
       <div>
         <h1 className="text-lg font-semibold text-[var(--color-foreground)]">Settings</h1>
         <p className="text-sm text-[var(--color-muted-foreground)] mt-0.5">
@@ -250,17 +309,98 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
           </div>
 
           <div className="border-t border-[var(--color-border)] pt-4 flex flex-col gap-4">
-            <FieldRow label="OpenAI model" hint="e.g. gpt-5.4-mini, gpt-4o">
-              <Input value={cfg.openaiModel} onChange={(e) => patchCfg({ openaiModel: e.target.value })} />
+            <FieldRow label="OpenAI model" hint="Save your OpenAI key below, then List models. You can still type a model id manually.">
+              <div className="flex gap-2">
+                <Input
+                  className="flex-1"
+                  value={cfg.openaiModel}
+                  onChange={(e) => patchCfg({ openaiModel: e.target.value })}
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={listingRemote === 'openai'}
+                  onClick={() => void listRemoteModels('openai')}
+                >
+                  List models
+                </Button>
+              </div>
+              {openaiListed.length > 0 ? (
+                <Select
+                  className="mt-2"
+                  value={cfg.openaiModel}
+                  onChange={(e) => patchCfg({ openaiModel: e.target.value })}
+                >
+                  {openaiListed.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </Select>
+              ) : null}
             </FieldRow>
-            <FieldRow label="Anthropic model" hint="e.g. claude-sonnet-4-6, claude-haiku-4-5">
-              <Input value={cfg.anthropicModel} onChange={(e) => patchCfg({ anthropicModel: e.target.value })} />
-            </FieldRow>
-            <FieldRow label="Gemini model ID" hint="e.g. gemini-3.1-flash-lite">
-              <Input value={cfg.geminiModel ?? ''} onChange={(e) => patchCfg({ geminiModel: e.target.value })} />
+            <FieldRow label="Anthropic model" hint="Save your Anthropic key below, then List models.">
+              <div className="flex gap-2">
+                <Input
+                  className="flex-1"
+                  value={cfg.anthropicModel}
+                  onChange={(e) => patchCfg({ anthropicModel: e.target.value })}
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={listingRemote === 'anthropic'}
+                  onClick={() => void listRemoteModels('anthropic')}
+                >
+                  List models
+                </Button>
+              </div>
+              {anthropicListed.length > 0 ? (
+                <Select
+                  className="mt-2"
+                  value={cfg.anthropicModel}
+                  onChange={(e) => patchCfg({ anthropicModel: e.target.value })}
+                >
+                  {anthropicListed.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </Select>
+              ) : null}
             </FieldRow>
             <FieldRow label="Gemini API base URL">
               <Input value={cfg.geminiBaseUrl ?? ''} onChange={(e) => patchCfg({ geminiBaseUrl: e.target.value })} placeholder="https://generativelanguage.googleapis.com/v1beta" />
+            </FieldRow>
+            <FieldRow label="Gemini model ID" hint="Save your Gemini key below, set base URL above, then List models.">
+              <div className="flex gap-2">
+                <Input
+                  className="flex-1"
+                  value={cfg.geminiModel ?? ''}
+                  onChange={(e) => patchCfg({ geminiModel: e.target.value })}
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={listingRemote === 'gemini'}
+                  onClick={() => void listRemoteModels('gemini')}
+                >
+                  List models
+                </Button>
+              </div>
+              {geminiListed.length > 0 ? (
+                <Select
+                  className="mt-2"
+                  value={cfg.geminiModel ?? ''}
+                  onChange={(e) => patchCfg({ geminiModel: e.target.value })}
+                >
+                  {geminiListed.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </Select>
+              ) : null}
             </FieldRow>
             <FieldRow label="Compatible base URL">
               <Input value={cfg.compatibleBaseUrl} onChange={(e) => patchCfg({ compatibleBaseUrl: e.target.value })} placeholder="https://…/v1" />

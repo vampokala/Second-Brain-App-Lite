@@ -17,10 +17,19 @@ use ingest::{run_ingest, FileIngestResult, IngestProgressPayload, TrackInference
 use serde::Deserialize;
 use sessions::{delete_session, list_sessions, load_session, save_session, SessionFile};
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
+
+#[derive(Default)]
+struct IngestRunState {
+    cancel_flag: Mutex<Option<Arc<AtomicBool>>>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,9 +176,164 @@ async fn fetch_ollama_models(base_url: String) -> Result<Vec<String>, String> {
     Ok(j.models.into_iter().map(|m| m.name).collect())
 }
 
+fn openai_model_list_filter(id: &str) -> bool {
+    let l = id.to_lowercase();
+    if l.contains("embedding")
+        || l.contains("moderation")
+        || l.contains("tts")
+        || l.contains("whisper")
+        || l.contains("dall-e")
+        || l.contains("davinci")
+        || l.contains("realtime")
+        || l.contains("transcribe")
+        || l.contains("omni-moderation")
+    {
+        return false;
+    }
+    true
+}
+
+#[tauri::command]
+async fn fetch_openai_models() -> Result<Vec<String>, String> {
+    let key = secrets::resolve_openai_key().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let res = client
+        .get("https://api.openai.com/v1/models")
+        .header("Authorization", format!("Bearer {}", key.trim()))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "OpenAI /v1/models failed ({}): {}",
+            status,
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    #[derive(Deserialize)]
+    struct OpenAiModel {
+        id: String,
+    }
+    #[derive(Deserialize)]
+    struct OpenAiModelsResp {
+        data: Vec<OpenAiModel>,
+    }
+    let j: OpenAiModelsResp = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = j
+        .data
+        .into_iter()
+        .map(|m| m.id)
+        .filter(|id| openai_model_list_filter(id))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+#[tauri::command]
+async fn fetch_anthropic_models() -> Result<Vec<String>, String> {
+    let key = secrets::resolve_anthropic_key().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let res = client
+        .get("https://api.anthropic.com/v1/models")
+        .header("x-api-key", key.trim())
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Anthropic /v1/models failed ({}): {}",
+            status,
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    #[derive(Deserialize)]
+    struct AnthropicModel {
+        id: String,
+    }
+    #[derive(Deserialize)]
+    struct AnthropicModelsResp {
+        data: Vec<AnthropicModel>,
+    }
+    let j: AnthropicModelsResp = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = j.data.into_iter().map(|m| m.id).collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+#[tauri::command]
+async fn fetch_gemini_models(gemini_base_url: String) -> Result<Vec<String>, String> {
+    let key = secrets::resolve_gemini_key().map_err(|e| e.to_string())?;
+    let base = gemini_base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("Gemini API base URL is empty — set “Gemini API base URL” first.".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let res = client
+        .get(format!("{}/models", base))
+        .query(&[("key", key.trim())])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Gemini list models failed ({}): {}",
+            status,
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GeminiModelEntry {
+        name: String,
+        supported_generation_methods: Option<Vec<String>>,
+    }
+    #[derive(Deserialize)]
+    struct GeminiModelsResp {
+        models: Option<Vec<GeminiModelEntry>>,
+    }
+    let j: GeminiModelsResp = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = Vec::new();
+    for m in j.models.unwrap_or_default() {
+        let supports = m
+            .supported_generation_methods
+            .as_ref()
+            .map(|v| v.iter().any(|x| x == "generateContent"))
+            .unwrap_or(true);
+        if !supports {
+            continue;
+        }
+        let tail = m.name.strip_prefix("models/").unwrap_or(&m.name);
+        if !tail.is_empty() {
+            ids.push(tail.to_string());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 #[tauri::command]
 async fn run_ingest_cmd(
     app: tauri::AppHandle,
+    ingest_state: tauri::State<'_, IngestRunState>,
     cfg: AppConfig,
     full_tier: bool,
     track_id: Option<String>,
@@ -178,11 +342,23 @@ async fn run_ingest_cmd(
         .as_deref()
         .map(ingest::sanitize_track_id)
         .filter(|s| !s.is_empty());
-    run_ingest(&cfg, full_tier, track.as_deref(), |progress| {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = ingest_state
+            .cancel_flag
+            .lock()
+            .map_err(|_| "failed to lock ingest state".to_string())?;
+        *slot = Some(cancel_flag.clone());
+    }
+    let out = run_ingest(&cfg, full_tier, track.as_deref(), |progress| {
         let _ = app.emit("ingest-progress", progress);
-    })
+    }, || cancel_flag.load(Ordering::Relaxed))
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    if let Ok(mut slot) = ingest_state.cancel_flag.lock() {
+        *slot = None;
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +397,7 @@ pub struct InferTrackPayload {
 #[tauri::command]
 async fn ingest_pasted_text_cmd(
     app: tauri::AppHandle,
+    ingest_state: tauri::State<'_, IngestRunState>,
     cfg: AppConfig,
     full_tier: bool,
     payload: IngestPastePayload,
@@ -278,16 +455,29 @@ async fn ingest_pasted_text_cmd(
             relative_path: Some(rel),
         },
     );
-    run_ingest(&cfg, full_tier, None, |progress| {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = ingest_state
+            .cancel_flag
+            .lock()
+            .map_err(|_| "failed to lock ingest state".to_string())?;
+        *slot = Some(cancel_flag.clone());
+    }
+    let out = run_ingest(&cfg, full_tier, None, |progress| {
         let _ = app.emit("ingest-progress", progress);
-    })
+    }, || cancel_flag.load(Ordering::Relaxed))
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    if let Ok(mut slot) = ingest_state.cancel_flag.lock() {
+        *slot = None;
+    }
+    out
 }
 
 #[tauri::command]
 async fn ingest_url_cmd(
     app: tauri::AppHandle,
+    ingest_state: tauri::State<'_, IngestRunState>,
     cfg: AppConfig,
     full_tier: bool,
     payload: IngestUrlPayload,
@@ -349,11 +539,37 @@ async fn ingest_url_cmd(
             relative_path: Some(rel),
         },
     );
-    run_ingest(&cfg, full_tier, None, |progress| {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = ingest_state
+            .cancel_flag
+            .lock()
+            .map_err(|_| "failed to lock ingest state".to_string())?;
+        *slot = Some(cancel_flag.clone());
+    }
+    let out = run_ingest(&cfg, full_tier, None, |progress| {
         let _ = app.emit("ingest-progress", progress);
-    })
+    }, || cancel_flag.load(Ordering::Relaxed))
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    if let Ok(mut slot) = ingest_state.cancel_flag.lock() {
+        *slot = None;
+    }
+    out
+}
+
+#[tauri::command]
+fn cancel_ingest_cmd(ingest_state: tauri::State<'_, IngestRunState>) -> Result<(), String> {
+    let slot = ingest_state
+        .cancel_flag
+        .lock()
+        .map_err(|_| "failed to lock ingest state".to_string())?;
+    if let Some(flag) = slot.as_ref() {
+        flag.store(true, Ordering::Relaxed);
+        Ok(())
+    } else {
+        Err("No ingest is currently running.".into())
+    }
 }
 
 #[tauri::command]
@@ -593,7 +809,7 @@ async fn update_memory_roll_up(cfg: AppConfig, session_id: String) -> Result<(),
     ];
 
     let provider = normalize_llm_provider(&cfg.default_provider);
-    let out = llm::complete_chat(&provider, &cfg, &messages)
+    let out = llm::complete_chat(&provider, &cfg, &messages, Default::default())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -628,7 +844,7 @@ async fn rollup_content_to_memory(cfg: AppConfig, content: String) -> Result<(),
     ];
 
     let provider = normalize_llm_provider(&cfg.default_provider);
-    let out = llm::complete_chat(&provider, &cfg, &messages)
+    let out = llm::complete_chat(&provider, &cfg, &messages, Default::default())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -644,6 +860,7 @@ async fn rollup_content_to_memory(cfg: AppConfig, content: String) -> Result<(),
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(IngestRunState::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -665,9 +882,13 @@ pub fn run() {
             save_api_secret,
             api_secret_hint,
             fetch_ollama_models,
+            fetch_openai_models,
+            fetch_anthropic_models,
+            fetch_gemini_models,
             run_ingest_cmd,
             ingest_pasted_text_cmd,
             ingest_url_cmd,
+            cancel_ingest_cmd,
             list_tracks_cmd,
             infer_track_cmd,
             list_chat_sessions,

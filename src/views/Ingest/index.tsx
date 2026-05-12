@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { useIngest } from '@/hooks/useIngest'
+import { ingestLlmSummary } from '@/lib/llm-display'
 import { cn } from '@/lib/utils'
 import type { AppConfig, IngestTrackMode, TrackInference } from '@/types'
 import { invoke } from '@tauri-apps/api/core'
@@ -15,12 +16,12 @@ type Banner = { kind: 'success' | 'error'; text: string } | null
 
 function StatusIcon({ status }: { status: string }) {
   if (status === 'ok') return <CheckCircle2 size={14} className="text-[var(--color-success)] shrink-0" />
-  if (status === 'skipped') return <SkipForward size={14} className="text-[var(--color-muted-foreground)] shrink-0" />
+  if (status === 'skipped' || status === 'cancelled') return <SkipForward size={14} className="text-[var(--color-muted-foreground)] shrink-0" />
   return <XCircle size={14} className="text-[var(--color-destructive)] shrink-0" />
 }
 
 export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; onBanner: (b: Banner) => void }) {
-  const { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack } = useIngest()
+  const { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack, cancelIngest } = useIngest()
   const [fullTier, setFullTier] = useState(false)
   const [pasteTitle, setPasteTitle] = useState('')
   const [pasteBody, setPasteBody] = useState('')
@@ -81,6 +82,8 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
 
   if (!cfg) return <div className="flex items-center justify-center h-full text-[var(--color-muted-foreground)] text-sm">Loading config…</div>
 
+  const llmLine = ingestLlmSummary(cfg)
+
   const handleRunIngest = async () => {
     try {
       const result = await runIngest(cfg, fullTier, resolvedTrackId)
@@ -90,6 +93,17 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
       } else {
         onBanner({ kind: 'success', text: `Ingest finished — ${result.length} files scanned.` })
       }
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    }
+  }
+
+  const handleStopIngest = async () => {
+    const shouldStop = window.confirm('Stop ingest now? You can restart it anytime.')
+    if (!shouldStop) return
+    try {
+      await cancelIngest()
+      onBanner({ kind: 'success', text: 'Stopping ingest…' })
     } catch (e) {
       onBanner({ kind: 'error', text: String(e) })
     }
@@ -133,11 +147,14 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-6 flex flex-col gap-5">
+    <div className="w-full px-6 py-6 flex flex-col gap-5">
       <div>
         <h1 className="text-lg font-semibold text-[var(--color-foreground)]">Ingest</h1>
         <p className="text-sm text-[var(--color-muted-foreground)] mt-0.5">
-          Scans <code className="text-xs bg-[var(--color-muted)] px-1 py-0.5 rounded">raw/</code> and builds structured wiki entries using your schema. Provider: <strong className="text-[var(--color-foreground)]">{cfg.defaultProvider}</strong>
+          Scans <code className="text-xs bg-[var(--color-muted)] px-1 py-0.5 rounded">raw/</code> and builds structured wiki entries using your schema. LLM:{' '}
+          <strong className="text-[var(--color-foreground)]">{llmLine.provider}</strong>
+          {' · '}
+          <strong className="text-[var(--color-foreground)]">{llmLine.model}</strong>
         </p>
       </div>
 
@@ -149,6 +166,11 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
               {busy ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
               {busy ? 'Ingesting…' : 'Run full ingest'}
             </Button>
+            {busy && (
+              <Button variant="destructive" onClick={handleStopIngest}>
+                Stop ingest
+              </Button>
+            )}
             <Button variant="secondary" onClick={() => setShowPaste(!showPaste)} disabled={busy}>
               {showPaste ? 'Hide paste' : 'Paste & ingest'}
             </Button>
@@ -317,7 +339,7 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
                   <tr key={r.relativeRawPath} className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-muted)] transition-colors">
                     <td className="px-4 py-2"><StatusIcon status={r.status} /></td>
                     <td className="px-4 py-2 font-mono text-[var(--color-foreground)]">{r.relativeRawPath}</td>
-                    <td className={cn('px-4 py-2 font-medium', r.status === 'ok' ? 'text-[var(--color-success)]' : r.status === 'skipped' ? 'text-[var(--color-muted-foreground)]' : 'text-[var(--color-destructive)]')}>
+                    <td className={cn('px-4 py-2 font-medium', r.status === 'ok' ? 'text-[var(--color-success)]' : r.status === 'skipped' || r.status === 'cancelled' ? 'text-[var(--color-muted-foreground)]' : 'text-[var(--color-destructive)]')}>
                       {r.status}
                     </td>
                     <td className="px-4 py-2 text-[var(--color-muted-foreground)]">{r.detail ?? ''}</td>
