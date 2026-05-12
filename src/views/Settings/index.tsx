@@ -3,10 +3,12 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
 import { useConfig } from '@/hooks/useConfig'
+import { DEFAULT_CHAT_PERSONA, DEFAULT_STUDENT_GRADE, FALLBACK_GRADE_OPTIONS, FALLBACK_PERSONA_OPTIONS, normalizeChatPersona } from '@/lib/personas'
 import { invoke } from '@tauri-apps/api/core'
 import { CheckCircle2, FolderOpen, XCircle } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 type Banner = { kind: 'success' | 'error'; text: string } | null
 
@@ -76,6 +78,30 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
   const [anthropicListed, setAnthropicListed] = useState<string[]>([])
   const [geminiListed, setGeminiListed] = useState<string[]>([])
   const [listingRemote, setListingRemote] = useState<null | 'openai' | 'anthropic' | 'gemini'>(null)
+
+  const [personaOptions, setPersonaOptions] = useState<{ id: string; label: string }[]>([])
+  const [gradeOptions, setGradeOptions] = useState<{ id: string; label: string }[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [p, g] = await Promise.all([
+          invoke<{ id: string; label: string }[]>('list_chat_personas'),
+          invoke<{ id: string; label: string }[]>('list_student_grade_options'),
+        ])
+        if (!cancelled) {
+          setPersonaOptions(p)
+          setGradeOptions(g)
+        }
+      } catch {
+        /* ignore */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   if (!cfg) {
     return (
@@ -200,6 +226,15 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
     try {
       await persistCfg(cfg)
       onBanner({ kind: 'success', text: 'Settings saved.' })
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    }
+  }
+
+  const handleSaveChat = async () => {
+    try {
+      await persistCfg(cfg)
+      onBanner({ kind: 'success', text: 'Chat settings saved.' })
     } catch (e) {
       onBanner({ kind: 'error', text: String(e) })
     }
@@ -412,6 +447,57 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
         </CardContent>
         <CardFooter>
           <Button size="sm" onClick={handleSave}>Save provider settings</Button>
+        </CardFooter>
+      </Card>
+
+      {/* Chat personas */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Chat</CardTitle>
+          <CardDescription>
+            Persona shapes tone and priorities for every chat message. Wiki and web toggles still control evidence sources.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <FieldRow
+            label="Persona"
+            hint="Applies to all chats until you change it. The current persona appears next to the checkboxes on the Chat screen."
+          >
+            <Select
+              value={normalizeChatPersona(cfg.chatPersona ?? DEFAULT_CHAT_PERSONA)}
+              onChange={(e) => patchCfg({ chatPersona: e.target.value })}
+            >
+              {(personaOptions.length ? personaOptions : FALLBACK_PERSONA_OPTIONS).map((o) => (
+                <option key={o.id} value={o.id}>{o.label}</option>
+              ))}
+            </Select>
+          </FieldRow>
+          {normalizeChatPersona(cfg.chatPersona ?? DEFAULT_CHAT_PERSONA) === 'student' && (
+            <FieldRow label="Grade" hint="Kindergarten through Grade 12 (high school).">
+              <Select
+                value={cfg.studentGrade?.trim() || DEFAULT_STUDENT_GRADE}
+                onChange={(e) => patchCfg({ studentGrade: e.target.value })}
+              >
+                {(gradeOptions.length ? gradeOptions : FALLBACK_GRADE_OPTIONS).map((o) => (
+                  <option key={o.id} value={o.id}>{o.label}</option>
+                ))}
+              </Select>
+            </FieldRow>
+          )}
+          <FieldRow
+            label="Additional persona instructions"
+            hint="Optional. Appended after the built-in persona text on every send—for example stack, team norms, or how deep to go."
+          >
+            <Textarea
+              value={cfg.personaPromptAddon ?? ''}
+              onChange={(e) => patchCfg({ personaPromptAddon: e.target.value })}
+              placeholder="e.g. Prefer TypeScript examples; we use trunk-based development."
+              className="min-h-24 resize-y"
+            />
+          </FieldRow>
+        </CardContent>
+        <CardFooter>
+          <Button size="sm" onClick={() => void handleSaveChat()}>Save chat settings</Button>
         </CardFooter>
       </Card>
 

@@ -58,6 +58,15 @@ pub struct AppConfig {
     /// Max response body bytes read when fetching a page.
     #[serde(default = "default_brave_max_body_bytes")]
     pub brave_max_body_bytes: usize,
+    /// Chat persona id (see `personas` module).
+    #[serde(default = "default_chat_persona")]
+    pub chat_persona: String,
+    /// K–12 grade token when `chat_persona` is `student` (`K`, `1`…`12`).
+    #[serde(default = "default_student_grade")]
+    pub student_grade: String,
+    /// Optional user text appended after built-in persona instructions.
+    #[serde(default)]
+    pub persona_prompt_addon: String,
 }
 
 fn default_provider() -> String {
@@ -118,6 +127,14 @@ fn default_brave_max_body_bytes() -> usize {
     1_000_000
 }
 
+fn default_chat_persona() -> String {
+    "wiki_maintainer".into()
+}
+
+fn default_student_grade() -> String {
+    "9".into()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -143,6 +160,9 @@ impl Default for AppConfig {
             brave_fetch_timeout_secs: default_brave_fetch_timeout_secs(),
             brave_page_max_chars: default_brave_page_max_chars(),
             brave_max_body_bytes: default_brave_max_body_bytes(),
+            chat_persona: default_chat_persona(),
+            student_grade: default_student_grade(),
+            persona_prompt_addon: String::new(),
         }
     }
 }

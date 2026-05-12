@@ -6,6 +6,7 @@ mod ingest;
 mod llm;
 mod manifest;
 mod paths;
+mod personas;
 mod retrieval;
 mod secrets;
 mod sessions;
@@ -856,6 +857,16 @@ async fn rollup_content_to_memory(cfg: AppConfig, content: String) -> Result<(),
     Ok(())
 }
 
+#[tauri::command]
+fn list_chat_personas() -> Vec<personas::PersonaMeta> {
+    personas::all_personas()
+}
+
+#[tauri::command]
+fn list_student_grade_options() -> Vec<personas::GradeOption> {
+    personas::student_grade_options()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -875,6 +886,8 @@ pub fn run() {
             get_platform_os,
             load_app_config,
             save_app_config,
+            list_chat_personas,
+            list_student_grade_options,
             pick_vault_folder,
             setup_vault_paths,
             read_schema_status,

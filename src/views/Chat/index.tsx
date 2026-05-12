@@ -3,10 +3,12 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { chatClipboardText, useChatSession } from '@/hooks/useChatSession'
+import { personaChipLabel } from '@/lib/personas'
 import { cn } from '@/lib/utils'
 import type { AppConfig } from '@/types'
 import { BookmarkPlus, BrainCircuit, Loader2, Send } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 
 type Banner = { kind: 'success' | 'error'; text: string } | null
@@ -163,33 +165,42 @@ export default function ChatView({ cfg, activeSessionId, setActiveSessionId, onB
         />
         <div className="flex flex-col gap-2 text-xs text-[var(--color-muted-foreground)]">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <div className="flex items-center gap-2">
-              <input
-                id="chat-wiki-only"
-                type="checkbox"
-                className="rounded border-[var(--color-border)]"
-                checked={wikiSourcesOnly}
-                onChange={(e) => setWikiSourcesOnly(e.target.checked)}
-                disabled={sendBusy}
-              />
-              <Label htmlFor="chat-wiki-only" className="font-normal cursor-pointer text-[var(--color-foreground)]">
-                Wiki sources only
-              </Label>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div className="flex items-center gap-2">
+                <input
+                  id="chat-wiki-only"
+                  type="checkbox"
+                  className="rounded border-[var(--color-border)]"
+                  checked={wikiSourcesOnly}
+                  onChange={(e) => setWikiSourcesOnly(e.target.checked)}
+                  disabled={sendBusy}
+                />
+                <Label htmlFor="chat-wiki-only" className="font-normal cursor-pointer text-[var(--color-foreground)]">
+                  Wiki sources only
+                </Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  id="chat-web-search"
+                  type="checkbox"
+                  className="rounded border-[var(--color-border)]"
+                  checked={includeWebSearch}
+                  onChange={(e) => setIncludeWebSearch(e.target.checked)}
+                  disabled={sendBusy || !braveKeyConfigured}
+                  title={!braveKeyConfigured ? 'Add a Brave Search API key in Settings → API Keys.' : undefined}
+                />
+                <Label htmlFor="chat-web-search" className="font-normal cursor-pointer text-[var(--color-foreground)]">
+                  Web search
+                </Label>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <input
-                id="chat-web-search"
-                type="checkbox"
-                className="rounded border-[var(--color-border)]"
-                checked={includeWebSearch}
-                onChange={(e) => setIncludeWebSearch(e.target.checked)}
-                disabled={sendBusy || !braveKeyConfigured}
-                title={!braveKeyConfigured ? 'Add a Brave Search API key in Settings → API Keys.' : undefined}
-              />
-              <Label htmlFor="chat-web-search" className="font-normal cursor-pointer text-[var(--color-foreground)]">
-                Web search
-              </Label>
-            </div>
+            <Link
+              to="/settings"
+              className="ml-auto shrink-0 text-xs text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)] hover:underline"
+              title="Change persona in Settings"
+            >
+              {personaChipLabel(cfg)}
+            </Link>
           </div>
           {!wikiSourcesOnly && !includeWebSearch && (
             <p id="chat-sources-hint" className="text-[var(--color-muted-foreground)]">
@@ -208,6 +219,9 @@ export default function ChatView({ cfg, activeSessionId, setActiveSessionId, onB
               {lastRetrievalMeta.includeWebSearch && (
                 <> · {lastRetrievalMeta.webPagesFetched} web page(s)</>
               )}
+              {' · '}
+              persona {lastRetrievalMeta.personaDisplay ?? personaChipLabel(cfg)}
+              {lastRetrievalMeta.personaAddonApplied ? ' · custom notes on' : ''}
             </p>
           )}
         </div>

@@ -34,6 +34,13 @@ No database. No cloud sync. Everything is plain Markdown on your disk, readable 
 | 📋 **Paste & Ingest** | Drop raw text directly into the app without saving a file first |
 | 🧠 **Rolling Memory** | Summarize sessions into a persistent memory file that enriches future chats |
 | 🗂️ **Session management** | Collapsible session list with per-session delete |
+| 🎭 **Chat personas** | Role-aware tone (incl. student grade K–12) plus optional custom instructions — see [Chat personas](./docs/chat-personas.md) |
+
+---
+
+## Documentation
+
+- [Chat personas](./docs/chat-personas.md) — configure role, student grade, and optional extra instructions for every chat.
 
 ---
 

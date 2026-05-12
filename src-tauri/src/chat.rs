@@ -3,6 +3,7 @@
 use crate::config::{normalize_llm_provider, resolved_triple, AppConfig};
 use crate::llm::{stream_chat, LlmMessage};
 use crate::paths::user_data_dir;
+use crate::personas;
 use crate::retrieval::{self, RetrievalHit};
 use crate::secrets;
 use crate::sessions::{ChatMessage, SessionFile};
@@ -22,6 +23,8 @@ pub struct ChatRetrievalMeta {
     pub max_score: f64,
     pub brave_key_configured: bool,
     pub web_pages_fetched: u32,
+    pub persona_display: String,
+    pub persona_addon_applied: bool,
 }
 
 pub fn memory_path() -> Result<PathBuf> {
@@ -117,7 +120,11 @@ where
         max_score,
         brave_key_configured,
         web_pages_fetched,
+        persona_display: personas::persona_display(cfg),
+        persona_addon_applied: personas::persona_addon_applied(cfg),
     });
+
+    let persona_block = personas::build_persona_system_section(cfg);
 
     let mode_instructions = mode_block(
         wiki_sources_only,
@@ -149,7 +156,7 @@ where
     };
 
     let system = format!(
-        r###"{mode_instructions}
+        r###"{persona_block}{mode_instructions}
 
 After your answer, end with a short section:
 
@@ -172,6 +179,7 @@ After your answer, end with a short section:
 {memory}
 
 {wiki_section}{web_section}"###,
+        persona_block = persona_block,
         mode_instructions = mode_instructions,
         sources_list = if wiki_sources_only {
             sources_list
