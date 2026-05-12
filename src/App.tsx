@@ -1,6 +1,6 @@
 import { AppShell, type Banner } from '@/components/layout/app-shell'
 import { ThemeProvider } from '@/components/layout/theme-provider'
-import { useConfig } from '@/hooks/useConfig'
+import { ConfigProvider, useConfig } from '@/hooks/useConfig'
 import ChatView from '@/views/Chat'
 import IngestView from '@/views/Ingest'
 import SettingsView from '@/views/Settings'
@@ -52,7 +52,9 @@ export default function App() {
   return (
     <ThemeProvider>
       <HashRouter>
-        <AppRoutes />
+        <ConfigProvider>
+          <AppRoutes />
+        </ConfigProvider>
       </HashRouter>
     </ThemeProvider>
   )

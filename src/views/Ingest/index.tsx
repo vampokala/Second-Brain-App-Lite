@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { useIngest } from '@/hooks/useIngest'
+import { ingestLlmSummary } from '@/lib/llm-display'
 import { cn } from '@/lib/utils'
 import type { AppConfig, IngestTrackMode, TrackInference } from '@/types'
 import { invoke } from '@tauri-apps/api/core'
@@ -81,6 +82,8 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
 
   if (!cfg) return <div className="flex items-center justify-center h-full text-[var(--color-muted-foreground)] text-sm">Loading config…</div>
 
+  const llmLine = ingestLlmSummary(cfg)
+
   const handleRunIngest = async () => {
     try {
       const result = await runIngest(cfg, fullTier, resolvedTrackId)
@@ -137,7 +140,10 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
       <div>
         <h1 className="text-lg font-semibold text-[var(--color-foreground)]">Ingest</h1>
         <p className="text-sm text-[var(--color-muted-foreground)] mt-0.5">
-          Scans <code className="text-xs bg-[var(--color-muted)] px-1 py-0.5 rounded">raw/</code> and builds structured wiki entries using your schema. Provider: <strong className="text-[var(--color-foreground)]">{cfg.defaultProvider}</strong>
+          Scans <code className="text-xs bg-[var(--color-muted)] px-1 py-0.5 rounded">raw/</code> and builds structured wiki entries using your schema. LLM:{' '}
+          <strong className="text-[var(--color-foreground)]">{llmLine.provider}</strong>
+          {' · '}
+          <strong className="text-[var(--color-foreground)]">{llmLine.model}</strong>
         </p>
       </div>
 

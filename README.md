@@ -142,6 +142,7 @@ Web fetch is best-effort: paywalls, robots, or slow hosts may reduce how many pa
 | Requirement | Notes |
 |---|---|
 | **Node.js 18+** | [nodejs.org](https://nodejs.org) |
+| **Python** | **Not used** — the app is TypeScript/React + Rust (Tauri); there are no `.py` files and no `node-gyp` native addons in this repo. |
 | **Rust stable** | Install via [rustup.rs](https://rustup.rs) |
 | **macOS** | Xcode Command Line Tools (`xcode-select --install`) |
 | **Windows** | MSVC build tools (Visual Studio Build Tools 2022) |

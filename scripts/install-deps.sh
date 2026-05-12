@@ -9,6 +9,8 @@
 #       If npm fails after retries but node_modules exists, exit 0 (for run-wiki).
 #
 # Env: SB_LITE_NPM_RETRIES (default 3)
+#
+# Python is not required for this project (no Python tooling in the repo).
 
 set -euo pipefail
 
@@ -35,6 +37,8 @@ Usage: scripts/install-deps.sh [options]
 
 Environment:
   SB_LITE_NPM_RETRIES   Retry count for npm (default: 3)
+
+Note: Python is not required (Node.js + Rust/Tauri only).
 EOF
       exit 0
       ;;
