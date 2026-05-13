@@ -67,6 +67,19 @@ pub struct AppConfig {
     /// Optional user text appended after built-in persona instructions.
     #[serde(default)]
     pub persona_prompt_addon: String,
+    /// When false, raster/SVG vision ingest is skipped (diagram images still need a vision model if you export PNG).
+    #[serde(default = "default_true")]
+    pub vision_enabled: bool,
+    #[serde(default = "default_vision_max_bytes")]
+    pub vision_max_bytes: usize,
+    #[serde(default = "default_vision_max_edge_px")]
+    pub vision_max_edge_px: u32,
+    /// Max UTF-8 bytes passed to the ingest LLM for text-based files (after local extraction).
+    #[serde(default = "default_text_max_bytes")]
+    pub text_max_bytes: usize,
+    /// Max rows per CSV/TSV/JSONL sheet or logical table.
+    #[serde(default = "default_tabular_max_rows")]
+    pub tabular_max_rows: usize,
 }
 
 fn default_provider() -> String {
@@ -135,6 +148,26 @@ fn default_student_grade() -> String {
     "9".into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_vision_max_bytes() -> usize {
+    4_194_304
+}
+
+fn default_vision_max_edge_px() -> u32 {
+    4096
+}
+
+fn default_text_max_bytes() -> usize {
+    1_048_576
+}
+
+fn default_tabular_max_rows() -> usize {
+    2_000
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -163,6 +196,11 @@ impl Default for AppConfig {
             chat_persona: default_chat_persona(),
             student_grade: default_student_grade(),
             persona_prompt_addon: String::new(),
+            vision_enabled: default_true(),
+            vision_max_bytes: default_vision_max_bytes(),
+            vision_max_edge_px: default_vision_max_edge_px(),
+            text_max_bytes: default_text_max_bytes(),
+            tabular_max_rows: default_tabular_max_rows(),
         }
     }
 }

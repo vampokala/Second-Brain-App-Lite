@@ -105,7 +105,27 @@ flowchart TD
   I --> J[Update ingest-manifest.json]
 ```
 
-The LLM returns structured JSON (`slug`, `title`, `one_line_summary`, `body_markdown`, `tags`, optional `glossary_patch`). Toggle **Full tier** for richer glossary prompts.
+The LLM returns structured JSON (`slug`, `title`, `one_line_summary`, `body_markdown_b64` / empty `body_markdown`, `tags`, optional `glossary_patch`). Toggle **Full tier** for richer glossary prompts.
+
+### Supported raw file types
+
+The app walks every file under `raw/` whose extension is supported. Text formats are extracted locally (or passed through) and capped by **Settings → Ingest & diagram vision → Text max bytes**. Tabular formats cap rows via **Tabular max rows**.
+
+**Documents & web:** `.md`, `.markdown`, `.mdx`, `.txt`, `.html`, `.htm`, `.pdf`, `.docx`, `.pptx`
+
+**Data & spreadsheets:** `.csv`, `.tsv`, `.jsonl`, `.ndjson`, `.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.ods`
+
+**Specs, IaC & code:** `.yaml`, `.yml`, `.json`, `.toml`, `.tf`, `.hcl`, `.sql`, `.dbml`, `.prisma`, plus common source extensions (`.py`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rs`, `.rb`, `.kt`, `.swift`, `.cpp`, `.cc`, `.h`, `.hpp`, `.c`, `.cs`, `.scala`, `.php`, `.sh`, `.bash`, `.ps1`)
+
+**Diagrams & notebooks:** `.drawio`, `.dio`, `.excalidraw`, `.svg` (text extraction), `.mmd`, `.mermaid`, `.puml`, `.plantuml`, `.iuml`, `.pu`, `.ipynb`
+
+**Vision (raster images):** `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff` — when **vision ingest** is enabled and your **default provider + model** supports multimodal input, the image is resized (see **Vision max bytes** / **Vision max edge**) and sent to the model so it can draft the wiki article from the diagram. If vision is off or the model is not vision-capable, those files are **skipped** with an explanatory status.
+
+> **Cost / privacy:** Vision sends base64 image data to your configured API (same as other providers). Use the caps in Settings to limit oversized screenshots.
+
+### Rollout / PR split (for contributors)
+
+Changes land cleanly as: (1) tabular + text + diagram-as-code extractors, (2) draw.io / Excalidraw / SVG text / PPTX, (3) multimodal LLM + raster vision ingest; optional Cargo feature `vision-svg-render` can rasterize SVG for an additional vision pass.
 
 ---
 

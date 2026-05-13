@@ -24,6 +24,19 @@ export type AppConfig = {
   chatPersona?: string
   studentGrade?: string
   personaPromptAddon?: string
+  /** When false, PNG/JPEG/etc. raw files are skipped (no vision call). */
+  visionEnabled?: boolean
+  visionMaxBytes?: number
+  visionMaxEdgePx?: number
+  textMaxBytes?: number
+  tabularMaxRows?: number
+}
+
+export type IngestUiHints = {
+  supportedExtensions: string[]
+  visionCapable: boolean
+  activeProvider: string
+  activeModelId: string
 }
 
 export type ChatRetrievalMeta = {

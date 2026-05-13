@@ -195,17 +195,11 @@ After your answer, end with a short section:
         web_section = web_section,
     );
 
-    let mut messages: Vec<LlmMessage> = vec![LlmMessage {
-        role: "system".into(),
-        content: system,
-    }];
+    let mut messages: Vec<LlmMessage> = vec![LlmMessage::text("system", system)];
 
     let tail: Vec<_> = session.messages.iter().rev().take(20).rev().cloned().collect();
     for m in tail {
-        messages.push(LlmMessage {
-            role: m.role,
-            content: m.content,
-        });
+        messages.push(LlmMessage::text(m.role, m.content));
     }
 
     let provider = normalize_llm_provider(&cfg.default_provider);

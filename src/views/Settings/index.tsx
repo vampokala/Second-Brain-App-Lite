@@ -7,6 +7,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useConfig } from '@/hooks/useConfig'
 import { DEFAULT_CHAT_PERSONA, DEFAULT_STUDENT_GRADE, FALLBACK_GRADE_OPTIONS, FALLBACK_PERSONA_OPTIONS, normalizeChatPersona } from '@/lib/personas'
 import { invoke } from '@tauri-apps/api/core'
+import type { IngestUiHints } from '@/types'
 import { CheckCircle2, FolderOpen, XCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
@@ -81,6 +82,14 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
 
   const [personaOptions, setPersonaOptions] = useState<{ id: string; label: string }[]>([])
   const [gradeOptions, setGradeOptions] = useState<{ id: string; label: string }[]>([])
+  const [ingestHints, setIngestHints] = useState<IngestUiHints | null>(null)
+
+  useEffect(() => {
+    if (!cfg) return
+    void invoke<IngestUiHints>('get_ingest_ui_hints', { cfg })
+      .then(setIngestHints)
+      .catch(() => setIngestHints(null))
+  }, [cfg])
 
   useEffect(() => {
     let cancelled = false
@@ -447,6 +456,73 @@ export default function SettingsView({ onBanner }: { onBanner: (b: Banner) => vo
         </CardContent>
         <CardFooter>
           <Button size="sm" onClick={handleSave}>Save provider settings</Button>
+        </CardFooter>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Ingest &amp; diagram vision</CardTitle>
+          <CardDescription>
+            Raw extensions are listed on the Ingest screen. Vision ingest sends diagram screenshots to a multimodal model (e.g. GPT-4o, Claude 4.x, Gemini, Ollama llava).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          {ingestHints ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-[var(--color-muted-foreground)]">Vision-capable (current model):</span>
+              <span className={ingestHints.visionCapable ? 'text-[var(--color-success)] font-medium' : 'text-[var(--color-destructive)] font-medium'}>
+                {ingestHints.visionCapable ? 'Yes' : 'No'}
+              </span>
+              <span className="text-xs text-[var(--color-muted-foreground)]">
+                ({ingestHints.activeProvider} / {ingestHints.activeModelId})
+              </span>
+            </div>
+          ) : null}
+          <div className="flex items-center gap-2">
+            <input
+              id="vision-ingest-enabled"
+              type="checkbox"
+              checked={cfg.visionEnabled !== false}
+              onChange={(e) => patchCfg({ visionEnabled: e.target.checked })}
+              className="rounded"
+            />
+            <Label htmlFor="vision-ingest-enabled">Enable vision ingest for raster images</Label>
+          </div>
+          <FieldRow label="Vision max bytes" hint="Raw file size limit before decode (default 4 MiB).">
+            <Input
+              type="number"
+              min={65536}
+              value={cfg.visionMaxBytes ?? 4_194_304}
+              onChange={(e) => patchCfg({ visionMaxBytes: Math.max(65536, parseInt(e.target.value, 10) || 4_194_304) })}
+            />
+          </FieldRow>
+          <FieldRow label="Vision max edge (px)" hint="Images are downscaled so width and height stay at or under this value.">
+            <Input
+              type="number"
+              min={256}
+              value={cfg.visionMaxEdgePx ?? 4096}
+              onChange={(e) => patchCfg({ visionMaxEdgePx: Math.max(256, parseInt(e.target.value, 10) || 4096) })}
+            />
+          </FieldRow>
+          <FieldRow label="Text max bytes" hint="After local extraction, cap UTF-8 size sent in the ingest prompt (default 1 MiB).">
+            <Input
+              type="number"
+              min={8192}
+              value={cfg.textMaxBytes ?? 1_048_576}
+              onChange={(e) => patchCfg({ textMaxBytes: Math.max(8192, parseInt(e.target.value, 10) || 1_048_576) })}
+            />
+          </FieldRow>
+          <FieldRow label="Tabular max rows" hint="Per CSV / sheet / JSONL logical rows (default 2000).">
+            <Input
+              type="number"
+              min={50}
+              value={cfg.tabularMaxRows ?? 2000}
+              onChange={(e) => patchCfg({ tabularMaxRows: Math.max(50, parseInt(e.target.value, 10) || 2000) })}
+            />
+          </FieldRow>
+        </CardContent>
+        <CardFooter>
+          <Button size="sm" onClick={handleSave}>Save ingest settings</Button>
         </CardFooter>
       </Card>
 
