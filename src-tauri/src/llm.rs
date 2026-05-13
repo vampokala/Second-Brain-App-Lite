@@ -3,14 +3,194 @@ use crate::secrets;
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+pub enum LlmPart {
+    Text(String),
+    Image {
+        mime: String,
+        base64_data: String,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct LlmMessage {
     pub role: String,
-    pub content: String,
+    pub parts: Vec<LlmPart>,
+}
+
+impl LlmMessage {
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            parts: vec![LlmPart::Text(content.into())],
+        }
+    }
+
+    /// User message with optional base64-encoded images `(mime, base64)`.
+    pub fn vision_user(user_text: impl Into<String>, images: Vec<(String, String)>) -> Self {
+        let mut parts = vec![LlmPart::Text(user_text.into())];
+        for (mime, base64_data) in images {
+            parts.push(LlmPart::Image { mime, base64_data });
+        }
+        Self {
+            role: "user".into(),
+            parts,
+        }
+    }
+
+    /// Text-only projection (drops images) for streaming chat paths.
+    pub fn collapse_text(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|p| {
+                if let LlmPart::Text(t) = p {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+pub fn model_id_for_provider(cfg: &AppConfig, provider: &str) -> String {
+    match provider.trim().to_lowercase().as_str() {
+        "openai" => cfg.openai_model.trim().to_string(),
+        "anthropic" => cfg.anthropic_model.trim().to_string(),
+        "gemini" => cfg.gemini_model.trim().to_string(),
+        "compatible" => cfg.compatible_model.trim().to_string(),
+        "ollama" => cfg.ollama_model.trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Conservative allow-list for multimodal ingest (diagram screenshots).
+pub fn provider_supports_vision(provider: &str, model: &str) -> bool {
+    let p = provider.trim().to_lowercase();
+    let m = model.trim().to_lowercase();
+    match p.as_str() {
+        "openai" | "compatible" => {
+            m.contains("gpt-4o")
+                || m.contains("gpt-4.1")
+                || m.contains("gpt-5")
+                || m.starts_with("o3")
+                || m.starts_with("o4")
+                || m.contains("vision")
+        }
+        "anthropic" => {
+            m.contains("claude-3-5-sonnet")
+                || m.contains("claude-3-5-haiku")
+                || m.contains("claude-3-7")
+                || m.contains("claude-sonnet-4")
+                || m.contains("claude-opus-4")
+                || m.contains("claude-haiku-4")
+        }
+        "gemini" => {
+            m.starts_with("gemini-1.5")
+                || m.starts_with("gemini-2")
+                || m.starts_with("gemini-3")
+                || m.starts_with("gemini")
+        }
+        "ollama" => {
+            m.contains("llava")
+                || m.contains("bakllava")
+                || m.contains("llama3.2-vision")
+                || m.contains("vision")
+        }
+        _ => false,
+    }
+}
+
+fn openai_chat_content(parts: &[LlmPart]) -> serde_json::Value {
+    if parts.len() == 1 {
+        if let LlmPart::Text(t) = &parts[0] {
+            return json!(t);
+        }
+    }
+    let blocks: Vec<serde_json::Value> = parts
+        .iter()
+        .filter_map(|p| match p {
+            LlmPart::Text(t) => Some(json!({"type": "text", "text": t})),
+            LlmPart::Image { mime, base64_data } => Some(json!({
+                "type": "image_url",
+                "image_url": {"url": format!("data:{};base64,{}", mime, base64_data)}
+            })),
+        })
+        .collect();
+    json!(blocks)
+}
+
+fn openai_messages_json(messages: &[LlmMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            json!({
+                "role": m.role,
+                "content": openai_chat_content(&m.parts),
+            })
+        })
+        .collect()
+}
+
+fn ollama_message_json(m: &LlmMessage) -> serde_json::Value {
+    let text = m.collapse_text();
+    let images: Vec<&str> = m
+        .parts
+        .iter()
+        .filter_map(|p| {
+            if let LlmPart::Image { base64_data, .. } = p {
+                Some(base64_data.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if images.is_empty() {
+        json!({"role": m.role, "content": text})
+    } else {
+        json!({"role": m.role, "content": text, "images": images})
+    }
+}
+
+fn anthropic_message_content(m: &LlmMessage) -> serde_json::Value {
+    if m.parts.len() == 1 {
+        if let LlmPart::Text(t) = &m.parts[0] {
+            return json!(t);
+        }
+    }
+    let blocks: Vec<serde_json::Value> = m
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            LlmPart::Text(t) => Some(json!({"type": "text", "text": t})),
+            LlmPart::Image { mime, base64_data } => Some(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": base64_data
+                }
+            })),
+        })
+        .collect();
+    json!(blocks)
+}
+
+fn gemini_parts(m: &LlmMessage) -> Vec<serde_json::Value> {
+    m.parts
+        .iter()
+        .map(|p| match p {
+            LlmPart::Text(t) => json!({"text": t}),
+            LlmPart::Image { mime, base64_data } => json!({
+                "inline_data": {"mime_type": mime, "data": base64_data}
+            }),
+        })
+        .collect()
 }
 
 /// Options for non-streaming chat completion.
@@ -147,7 +327,7 @@ async fn ollama_complete(
     );
     let mut body = json!({
       "model": cfg.ollama_model,
-      "messages": messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect::<Vec<_>>(),
+      "messages": messages.iter().map(|m| ollama_message_json(m)).collect::<Vec<_>>(),
       "stream": stream,
     });
     if json_response {
@@ -174,9 +354,10 @@ async fn openai_complete(
     let key = blocking_secret(|| secrets::resolve_openai_key()).await?;
     let url = "https://api.openai.com/v1/chat/completions";
     let model_id = openai_chat_model_for_api(&cfg.openai_model);
+    let messages_json = openai_messages_json(messages);
     let mut body = json!({
       "model": model_id,
-      "messages": messages,
+      "messages": messages_json,
       "stream": stream,
     });
     if !openai_chat_omits_temperature_parameter(&model_id) {
@@ -280,9 +461,10 @@ async fn openai_compatible_complete(
     let base = cfg.compatible_base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
     let model_id = openai_chat_model_for_api(&cfg.compatible_model);
+    let messages_json = openai_messages_json(messages);
     let mut body = json!({
       "model": model_id,
-      "messages": messages,
+      "messages": messages_json,
       "stream": stream,
     });
     if !openai_chat_omits_temperature_parameter(&model_id) {
@@ -491,13 +673,13 @@ async fn gemini_complete(
     let mut contents: Vec<serde_json::Value> = Vec::new();
     for m in messages {
         if m.role == "system" {
-            system_chunks.push(m.content.clone());
+            system_chunks.push(m.collapse_text());
             continue;
         }
         let role = if m.role == "assistant" { "model" } else { "user" };
         contents.push(json!({
             "role": role,
-            "parts": [{"text": m.content}],
+            "parts": gemini_parts(m),
         }));
     }
 
@@ -543,12 +725,12 @@ async fn anthropic_complete(
     let mut anth_msgs = vec![];
     for m in messages {
         if m.role == "system" {
-            system.push_str(&m.content);
+            system.push_str(&m.collapse_text());
             system.push('\n');
         } else {
             anth_msgs.push(json!({
               "role": if m.role == "assistant" { "assistant" } else { "user" },
-              "content": m.content,
+              "content": anthropic_message_content(m),
             }));
         }
     }
@@ -648,7 +830,7 @@ where
     );
     let body = json!({
       "model": cfg.ollama_model,
-      "messages": messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect::<Vec<_>>(),
+      "messages": messages.iter().map(|m| ollama_message_json(m)).collect::<Vec<_>>(),
       "stream": true,
     });
     let c = client()?;
@@ -706,9 +888,10 @@ where
     } else {
         openai_chat_model_for_api(&cfg.compatible_model)
     };
+    let messages_json = openai_messages_json(messages);
     let body = json!({
       "model": model,
-      "messages": messages,
+      "messages": messages_json,
       "temperature": 0.3,
       "stream": true,
     });
@@ -746,4 +929,40 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod llm_vision_tests {
+    use super::*;
+
+    #[test]
+    fn provider_supports_gpt4o() {
+        assert!(provider_supports_vision("openai", "gpt-4o-mini"));
+        assert!(!provider_supports_vision("openai", "gpt-3.5-turbo"));
+    }
+
+    #[test]
+    fn provider_supports_claude_sonnet4() {
+        assert!(provider_supports_vision("anthropic", "claude-sonnet-4-6"));
+        assert!(!provider_supports_vision("anthropic", "claude-2.1"));
+    }
+
+    #[test]
+    fn openai_message_includes_image_url() {
+        let msgs = vec![
+            LlmMessage::text("system", "sys"),
+            LlmMessage::vision_user("look", vec![("image/png".into(), "AAA".into())]),
+        ];
+        let j = openai_messages_json(&msgs);
+        let s = serde_json::to_string(&j).unwrap();
+        assert!(s.contains("image_url"));
+        assert!(s.contains("data:image/png;base64,AAA"));
+    }
+
+    #[test]
+    fn ollama_message_includes_images_array() {
+        let m = LlmMessage::vision_user("x", vec![("image/png".into(), "Ym9n".into())]);
+        let v = ollama_message_json(&m);
+        assert!(v.get("images").is_some());
+    }
 }

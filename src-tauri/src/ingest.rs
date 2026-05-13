@@ -2,10 +2,12 @@
 
 use crate::atomic;
 use crate::config::{normalize_llm_provider, resolved_triple, AppConfig};
-use crate::llm::{complete_chat, ChatCompleteOptions, LlmMessage};
+use crate::llm::{
+    complete_chat, model_id_for_provider, provider_supports_vision, ChatCompleteOptions, LlmMessage,
+};
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use crate::manifest::{sha256_bytes, ManifestEntry};
+use crate::manifest::{raw_file_stamp, sha256_bytes, ManifestEntry};
 use crate::wiki;
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -755,6 +757,33 @@ where
             relative_path: Some(rel.clone()),
         });
 
+        // Fast path: manifest already has size + mtime from last successful ingest; skip read/hash/LLM.
+        if let Some(ent) = manifest.entries.get(&rel) {
+            if !ent.content_sha256.is_empty() {
+                if let (Some(sz), Some(ms)) = (ent.source_size, ent.source_mtime_ms) {
+                    if let Ok((cur_sz, cur_ms)) = raw_file_stamp(path) {
+                        if cur_sz == sz && cur_ms == ms {
+                            on_progress(IngestProgressPayload {
+                                phase: "skipped".into(),
+                                message:
+                                    "Unchanged (metadata matches manifest); skipping read and LLM"
+                                        .into(),
+                                current: Some(current_i),
+                                total: Some(total_n),
+                                relative_path: Some(rel.clone()),
+                            });
+                            results.push(FileIngestResult {
+                                relative_raw_path: rel.clone(),
+                                status: "skipped".into(),
+                                detail: Some("unchanged".into()),
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -776,8 +805,12 @@ where
         };
 
         let hash = sha256_bytes(&bytes);
-        if let Some(ent) = manifest.entries.get(&rel) {
-            if ent.content_sha256 == hash {
+        if let Some(e) = manifest.entries.get_mut(&rel) {
+            if e.content_sha256 == hash {
+                if let Ok((sz, ms)) = raw_file_stamp(path) {
+                    e.source_size = Some(sz);
+                    e.source_mtime_ms = Some(ms);
+                }
                 on_progress(IngestProgressPayload {
                     phase: "skipped".into(),
                     message: "Unchanged (hash matches manifest); skipping LLM".into(),
@@ -794,10 +827,10 @@ where
             }
         }
 
-        let text = match crate::extract::extract_plain_text(path, &bytes) {
-            Ok(t) => t,
+        let payload = match crate::extract::classify_for_ingest(path, &bytes, cfg) {
+            Ok(p) => p,
             Err(e) => {
-                let detail = format!("extract text: {}", e);
+                let detail = format!("extract/classify: {}", e);
                 on_progress(IngestProgressPayload {
                     phase: "error".into(),
                     message: detail.clone(),
@@ -813,23 +846,69 @@ where
                 continue;
             }
         };
-        if text.trim().is_empty() {
-            let detail =
-                "extracted text is empty (file may be scanned PDF, encrypted, or blank)".to_string();
-            on_progress(IngestProgressPayload {
-                phase: "error".into(),
-                message: detail.clone(),
-                current: Some(current_i),
-                total: Some(total_n),
-                relative_path: Some(rel.clone()),
-            });
-            results.push(FileIngestResult {
-                relative_raw_path: rel.clone(),
-                status: "error".into(),
-                detail: Some(detail),
-            });
-            continue;
-        }
+
+        let (is_vision_ingest, text_content, vision_image) = match payload {
+            crate::extract::IngestPayload::Skipped(reason) => {
+                on_progress(IngestProgressPayload {
+                    phase: "skipped".into(),
+                    message: reason.clone(),
+                    current: Some(current_i),
+                    total: Some(total_n),
+                    relative_path: Some(rel.clone()),
+                });
+                results.push(FileIngestResult {
+                    relative_raw_path: rel.clone(),
+                    status: "skipped".into(),
+                    detail: Some(reason),
+                });
+                continue;
+            }
+            crate::extract::IngestPayload::Text(t) => {
+                if t.trim().is_empty() {
+                    let detail =
+                        "extracted text is empty (file may be scanned PDF, encrypted, or blank)"
+                            .to_string();
+                    on_progress(IngestProgressPayload {
+                        phase: "error".into(),
+                        message: detail.clone(),
+                        current: Some(current_i),
+                        total: Some(total_n),
+                        relative_path: Some(rel.clone()),
+                    });
+                    results.push(FileIngestResult {
+                        relative_raw_path: rel.clone(),
+                        status: "error".into(),
+                        detail: Some(detail),
+                    });
+                    continue;
+                }
+                (false, t, None)
+            }
+            crate::extract::IngestPayload::Image(img) => {
+                let mid = model_id_for_provider(cfg, &provider);
+                if !provider_supports_vision(&provider, &mid) {
+                    let detail = format!(
+                        "vision unsupported for provider/model {}/{} — pick a vision-capable model in Settings",
+                        provider, mid
+                    );
+                    on_progress(IngestProgressPayload {
+                        phase: "skipped".into(),
+                        message: detail.clone(),
+                        current: Some(current_i),
+                        total: Some(total_n),
+                        relative_path: Some(rel.clone()),
+                    });
+                    results.push(FileIngestResult {
+                        relative_raw_path: rel.clone(),
+                        status: "skipped".into(),
+                        detail: Some(detail),
+                    });
+                    continue;
+                }
+                (true, String::new(), Some(img))
+            }
+        };
+
         let fallback_slug = kebab_slug(path);
         let track_id = track_from_rel(&rel);
 
@@ -843,33 +922,56 @@ where
             .as_ref()
             .map(|t| format!("Track namespace: {t}. Keep this identity explicit in title/body and include tag track:{t}."))
             .unwrap_or_else(|| "Track namespace: unknown/inbox. Infer a concise domain tag when obvious.".into());
-        let sys = format!(
-            "{}\n\nYou output ONLY valid JSON (no markdown fences, no commentary). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown_b64 (REQUIRED: standard Base64 of UTF-8 for the wiki markdown body WITHOUT YAML frontmatter — include the ENTIRE article here: headings, bullet lists, ```mermaid``` blocks, ```yaml```/```code``` fences, Markdown tables, and inline code so JSON never contains raw fence or quote characters from the article), body_markdown (always use empty string \"\" — do not put article text here), tags (string array), glossary_patch (string; use \"\" if none).\n\n{}\n{}",
+
+        let json_keys = "You output ONLY valid JSON (no markdown fences, no commentary). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown_b64 (REQUIRED: standard Base64 of UTF-8 for the wiki markdown body WITHOUT YAML frontmatter — include the ENTIRE article here: headings, bullet lists, ```mermaid``` blocks, ```yaml```/```code``` fences, Markdown tables, and inline code so JSON never contains raw fence or quote characters from the article), body_markdown (always use empty string \"\" — do not put article text here), tags (string array), glossary_patch (string; use \"\" if none).";
+
+        let sys_text = format!(
+            "{}\n\n{}\n\n{}\n{}",
             tier_hint,
+            json_keys,
             "Integrate with existing wiki style per schema.",
             track_hint
         );
 
-        let user = format!(
-            "### CLAUDE.md (schema)\n{}\n\n### llm-wiki.md (pattern)\n{}\n\n### index excerpt\n{}\n\n### glossary excerpt\n{}\n\n### Raw path\nraw/{}\n\n(Plain text only for ingest: PDF/Word/HTML are extracted locally; Markdown files pass through as-is.)\n\n### Raw content\n{}",
+        let sys_vision = format!(
+            "{}\n\n{}\n\nFrom the attached diagram or screenshot, infer: (1) diagram type (architecture, sequence, BRD, ERD, data-flow, wireframe, org chart, other); (2) major components/services/entities with one-line descriptions; (3) relationships as lines `A --[label]--> B`; (4) environments, trust boundaries, regions if visible; (5) open questions or illegible areas. Then write the wiki markdown article (same JSON envelope).\n\n{}\n{}",
+            tier_hint,
+            json_keys,
+            "Integrate with existing wiki style per schema.",
+            track_hint
+        );
+
+        let user_common = format!(
+            "### CLAUDE.md (schema)\n{}\n\n### llm-wiki.md (pattern)\n{}\n\n### index excerpt\n{}\n\n### glossary excerpt\n{}\n\n### Raw path\nraw/{}\n",
             claude,
             llm_wiki,
             index_excerpt,
             glossary_excerpt,
             rel,
-            text.chars().take(48_000).collect::<String>()
         );
 
-        let mut round_messages: Vec<LlmMessage> = vec![
-            LlmMessage {
-                role: "system".into(),
-                content: sys,
-            },
-            LlmMessage {
-                role: "user".into(),
-                content: user,
-            },
-        ];
+        let user = if is_vision_ingest {
+            format!(
+                "{user_common}\nThis ingest pass uses a **vision** model on an image file. Tags should include `diagram` plus a subtype such as `architecture` or `brd` when appropriate.\n"
+            )
+        } else {
+            format!(
+                "{user_common}\n(Plain text / extracted text for ingest: PDF/Word/HTML/tabular/diagrams-as-code are normalized locally.)\n\n### Raw content\n{text_content}",
+            )
+        };
+
+        let mut round_messages: Vec<LlmMessage> = if is_vision_ingest {
+            let img = vision_image.expect("vision image");
+            vec![
+                LlmMessage::text("system", sys_vision),
+                LlmMessage::vision_user(user, vec![(img.mime, img.base64)]),
+            ]
+        } else {
+            vec![
+                LlmMessage::text("system", sys_text),
+                LlmMessage::text("user", user),
+            ]
+        };
 
         on_progress(IngestProgressPayload {
             phase: "llm".into(),
@@ -932,14 +1034,11 @@ where
                         parsed_opt = None;
                         break;
                     }
-                    round_messages.push(LlmMessage {
-                        role: "assistant".into(),
-                        content: raw,
-                    });
-                    round_messages.push(LlmMessage {
-                        role: "user".into(),
-                        content: "That reply was not valid JSON or failed parsing. Output ONLY one JSON object (no markdown fences). Put the full wiki markdown article ONLY in body_markdown_b64 as standard Base64 of UTF-8 (this must include any ```mermaid``` diagrams, tables, and fenced code from the source). Set body_markdown to the empty string \"\". Do not place article text, backticks, or raw newlines inside any JSON string except inside the base64 alphabet for body_markdown_b64. Required top-level keys: slug, title, one_line_summary, body_markdown_b64, body_markdown, tags, glossary_patch.".into(),
-                    });
+                    round_messages.push(LlmMessage::text("assistant", raw));
+                    round_messages.push(LlmMessage::text(
+                        "user",
+                        "That reply was not valid JSON or failed parsing. Output ONLY one JSON object (no markdown fences). Put the full wiki markdown article ONLY in body_markdown_b64 as standard Base64 of UTF-8 (this must include any ```mermaid``` diagrams, tables, and fenced code from the source). Set body_markdown to the empty string \"\". Do not place article text, backticks, or raw newlines inside any JSON string except inside the base64 alphabet for body_markdown_b64. Required top-level keys: slug, title, one_line_summary, body_markdown_b64, body_markdown, tags, glossary_patch.",
+                    ));
                     on_progress(IngestProgressPayload {
                         phase: "llm".into(),
                         message: "Retrying model (fix JSON)…".into(),
@@ -1090,12 +1189,15 @@ where
             continue;
         }
 
+        let (src_sz, src_ms) = raw_file_stamp(path).unwrap_or((bytes.len() as u64, 0));
         manifest.entries.insert(
             rel.clone(),
             ManifestEntry {
                 content_sha256: hash,
                 last_ingest_at: Utc::now().to_rfc3339(),
                 wiki_paths: vec![format!("sources/{}/{}.md", track_folder, slug)],
+                source_size: Some(src_sz),
+                source_mtime_ms: Some(src_ms),
             },
         );
 

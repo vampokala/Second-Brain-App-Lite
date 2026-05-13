@@ -7,7 +7,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useIngest } from '@/hooks/useIngest'
 import { ingestLlmSummary } from '@/lib/llm-display'
 import { cn } from '@/lib/utils'
-import type { AppConfig, IngestTrackMode, TrackInference } from '@/types'
+import type { AppConfig, IngestTrackMode, IngestUiHints, TrackInference } from '@/types'
 import { invoke } from '@tauri-apps/api/core'
 import { BrainCircuit, CheckCircle2, FileText, Loader2, SkipForward, XCircle } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -34,11 +34,24 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
   const [existingTrack, setExistingTrack] = useState('')
   const [newTrack, setNewTrack] = useState('')
   const [autoInference, setAutoInference] = useState<TrackInference | null>(null)
+  const [ingestHints, setIngestHints] = useState<IngestUiHints | null>(null)
+  /** Shown on this tab when ingest fails or returns per-file errors (banner alone is easy to miss). */
+  const [ingestError, setIngestError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!cfg) return
     listTracks(cfg).then(setTracks).catch(() => setTracks([]))
   }, [cfg, listTracks])
+
+  useEffect(() => {
+    if (!cfg) return
+    invoke<IngestUiHints>('get_ingest_ui_hints', { cfg })
+      .then(setIngestHints)
+      .catch((e) => {
+        setIngestHints(null)
+        setIngestError(`Could not load ingest hints: ${String(e)}`)
+      })
+  }, [cfg])
 
   const resolvedTrackId = useMemo(() => {
     if (trackMode === 'existing') return existingTrack.trim() || undefined
@@ -85,16 +98,22 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
   const llmLine = ingestLlmSummary(cfg)
 
   const handleRunIngest = async () => {
+    setIngestError(null)
     try {
       const result = await runIngest(cfg, fullTier, resolvedTrackId)
-      const errCount = result.filter((r) => r.status === 'error').length
-      if (errCount > 0) {
-        onBanner({ kind: 'error', text: `Ingest finished with ${errCount} error(s).` })
+      const errs = result.filter((r) => r.status === 'error')
+      if (errs.length > 0) {
+        const lines = errs.map((r) => `${r.relativeRawPath}: ${r.detail ?? r.status}`).join('\n')
+        setIngestError(`${errs.length} error(s):\n${lines}`)
+        onBanner({ kind: 'error', text: `Ingest finished with ${errs.length} error(s). See message on Ingest tab.` })
       } else {
+        setIngestError(null)
         onBanner({ kind: 'success', text: `Ingest finished — ${result.length} files scanned.` })
       }
     } catch (e) {
-      onBanner({ kind: 'error', text: String(e) })
+      const msg = String(e)
+      setIngestError(msg)
+      onBanner({ kind: 'error', text: msg })
     }
   }
 
@@ -112,42 +131,71 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
   const handlePasteIngest = async () => {
     if (!pasteBody.trim()) { onBanner({ kind: 'error', text: 'Enter some text to ingest.' }); return }
     if (!maybeWarnLowConfidence()) return
+    setIngestError(null)
     try {
       const result = await pasteAndIngest(cfg, fullTier, pasteBody, pasteTitle, resolvedTrackId, trackMode === 'auto')
-      const errCount = result.filter((r) => r.status === 'error').length
-      if (errCount > 0) {
-        onBanner({ kind: 'error', text: `Ingest finished with ${errCount} error(s).` })
+      const errs = result.filter((r) => r.status === 'error')
+      if (errs.length > 0) {
+        const lines = errs.map((r) => `${r.relativeRawPath}: ${r.detail ?? r.status}`).join('\n')
+        setIngestError(`${errs.length} error(s):\n${lines}`)
+        onBanner({ kind: 'error', text: `Paste ingest: ${errs.length} error(s). See message on Ingest tab.` })
       } else {
+        setIngestError(null)
         setPasteBody('')
         onBanner({ kind: 'success', text: `Saved to raw/<track>/pastes and ingested (${result.length} files).` })
         listTracks(cfg).then(setTracks).catch(() => undefined)
       }
     } catch (e) {
-      onBanner({ kind: 'error', text: String(e) })
+      const msg = String(e)
+      setIngestError(msg)
+      onBanner({ kind: 'error', text: msg })
     }
   }
 
   const handleUrlIngest = async () => {
     if (!urlInput.trim()) { onBanner({ kind: 'error', text: 'Enter a URL to ingest.' }); return }
     if (!maybeWarnLowConfidence()) return
+    setIngestError(null)
     try {
       const result = await ingestUrl(cfg, fullTier, urlInput, urlStem, resolvedTrackId, trackMode === 'auto')
-      const errCount = result.filter((r) => r.status === 'error').length
-      if (errCount > 0) {
-        onBanner({ kind: 'error', text: `Ingest finished with ${errCount} error(s).` })
+      const errs = result.filter((r) => r.status === 'error')
+      if (errs.length > 0) {
+        const lines = errs.map((r) => `${r.relativeRawPath}: ${r.detail ?? r.status}`).join('\n')
+        setIngestError(`${errs.length} error(s):\n${lines}`)
+        onBanner({ kind: 'error', text: `URL ingest: ${errs.length} error(s). See message on Ingest tab.` })
       } else {
+        setIngestError(null)
         setUrlInput('')
         setUrlStem('')
         onBanner({ kind: 'success', text: `URL fetched and ingested (${result.length} files).` })
         listTracks(cfg).then(setTracks).catch(() => undefined)
       }
     } catch (e) {
-      onBanner({ kind: 'error', text: String(e) })
+      const msg = String(e)
+      setIngestError(msg)
+      onBanner({ kind: 'error', text: msg })
     }
   }
 
   return (
     <div className="w-full px-6 py-6 flex flex-col gap-5">
+      {ingestError && (
+        <div
+          role="alert"
+          className="rounded-[var(--radius-md)] border border-[var(--color-destructive)] bg-[var(--color-destructive)]/10 px-3 py-2 text-sm text-[var(--color-foreground)]"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <pre className="whitespace-pre-wrap break-words flex-1 font-mono text-xs leading-relaxed">{ingestError}</pre>
+            <div className="flex shrink-0 gap-1">
+              <CopyButton text={ingestError} label="Copy error" />
+              <Button type="button" variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setIngestError(null)}>
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div>
         <h1 className="text-lg font-semibold text-[var(--color-foreground)]">Ingest</h1>
         <p className="text-sm text-[var(--color-muted-foreground)] mt-0.5">
@@ -155,7 +203,21 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
           <strong className="text-[var(--color-foreground)]">{llmLine.provider}</strong>
           {' · '}
           <strong className="text-[var(--color-foreground)]">{llmLine.model}</strong>
+          {ingestHints ? (
+            <>
+              {' · '}
+              <span className={ingestHints.visionCapable ? 'text-[var(--color-success)]' : 'text-[var(--color-muted-foreground)]'}>
+                Vision ingest: {ingestHints.visionCapable ? 'supported' : 'not supported'} ({ingestHints.activeProvider}/{ingestHints.activeModelId})
+              </span>
+            </>
+          ) : null}
         </p>
+        {ingestHints && (
+          <details className="mt-2 text-xs text-[var(--color-muted-foreground)] max-w-3xl">
+            <summary className="cursor-pointer select-none text-[var(--color-foreground)]">Supported raw extensions ({ingestHints.supportedExtensions.length})</summary>
+            <p className="mt-1.5 break-words">{ingestHints.supportedExtensions.join(', ')}</p>
+          </details>
+        )}
       </div>
 
       {/* Controls */}

@@ -2,6 +2,11 @@ mod atomic;
 mod chat;
 mod config;
 mod extract;
+mod extract_diagrams;
+mod extract_image;
+mod extract_notebook;
+mod extract_pptx;
+mod extract_tabular;
 mod ingest;
 mod llm;
 mod manifest;
@@ -52,6 +57,30 @@ fn default_true() -> bool {
 pub struct SchemaStatus {
     pub claude_md: bool,
     pub llm_wiki_md: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestUiHints {
+    pub supported_extensions: Vec<String>,
+    pub vision_capable: bool,
+    pub active_provider: String,
+    pub active_model_id: String,
+}
+
+#[tauri::command]
+fn get_ingest_ui_hints(cfg: AppConfig) -> Result<IngestUiHints, String> {
+    let provider = normalize_llm_provider(&cfg.default_provider);
+    let mid = llm::model_id_for_provider(&cfg, &provider);
+    Ok(IngestUiHints {
+        supported_extensions: crate::extract::SUPPORTED_EXTENSIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        vision_capable: llm::provider_supports_vision(&provider, &mid),
+        active_provider: provider,
+        active_model_id: mid,
+    })
 }
 
 #[tauri::command]
@@ -799,14 +828,11 @@ async fn update_memory_roll_up(cfg: AppConfig, session_id: String) -> Result<(),
     );
 
     let messages = vec![
-        llm::LlmMessage {
-            role: "system".into(),
-            content: "You maintain a short personal memory file for the user's wiki assistant.".into(),
-        },
-        llm::LlmMessage {
-            role: "user".into(),
-            content: prompt_user,
-        },
+        llm::LlmMessage::text(
+            "system",
+            "You maintain a short personal memory file for the user's wiki assistant.",
+        ),
+        llm::LlmMessage::text("user", prompt_user),
     ];
 
     let provider = normalize_llm_provider(&cfg.default_provider);
@@ -834,14 +860,11 @@ async fn rollup_content_to_memory(cfg: AppConfig, content: String) -> Result<(),
     );
 
     let messages = vec![
-        llm::LlmMessage {
-            role: "system".into(),
-            content: "You maintain a short personal memory file for the user's wiki assistant.".into(),
-        },
-        llm::LlmMessage {
-            role: "user".into(),
-            content: prompt_user,
-        },
+        llm::LlmMessage::text(
+            "system",
+            "You maintain a short personal memory file for the user's wiki assistant.",
+        ),
+        llm::LlmMessage::text("user", prompt_user),
     ];
 
     let provider = normalize_llm_provider(&cfg.default_provider);
@@ -884,6 +907,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_platform_os,
+            get_ingest_ui_hints,
             load_app_config,
             save_app_config,
             list_chat_personas,
