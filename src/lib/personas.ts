@@ -12,6 +12,7 @@ export const FALLBACK_PERSONA_OPTIONS: { id: string; label: string }[] = [
   { id: 'tester', label: 'Tester / QA' },
   { id: 'architect', label: 'Architect' },
   { id: 'technical_manager', label: 'Technical manager' },
+  { id: 'small_business_owner', label: 'Small business owner' },
   { id: 'student', label: 'Student' },
 ]
 
@@ -31,6 +32,7 @@ const KNOWN = new Set([
   'tester',
   'architect',
   'technical_manager',
+  'small_business_owner',
   'student',
 ])
 
@@ -42,6 +44,7 @@ const LABELS: Record<string, string> = {
   tester: 'Tester / QA',
   architect: 'Architect',
   technical_manager: 'Technical manager',
+  small_business_owner: 'Small business owner',
   student: 'Student',
 }
 

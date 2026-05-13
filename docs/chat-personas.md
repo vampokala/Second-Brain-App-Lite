@@ -23,6 +23,7 @@ Click **Save chat settings** to persist changes to `config.json` in app data.
 | `tester` | Tester / QA |
 | `architect` | Architect |
 | `technical_manager` | Technical manager |
+| `small_business_owner` | Small business owner |
 | `student` | Student |
 
 Default persona is **Wiki maintainer**. Default student grade token is **9** (Grade 9) if the stored value is missing or invalid.

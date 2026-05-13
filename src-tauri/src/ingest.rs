@@ -3,6 +3,7 @@
 use crate::atomic;
 use crate::config::{normalize_llm_provider, resolved_triple, AppConfig};
 use crate::llm::{complete_chat, ChatCompleteOptions, LlmMessage};
+use base64::engine::general_purpose;
 use base64::Engine as _;
 use crate::manifest::{sha256_bytes, ManifestEntry};
 use crate::wiki;
@@ -117,13 +118,20 @@ fn extract_balanced_json_object(s: &str) -> Option<String> {
     None
 }
 
+fn preprocess_model_json(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string()
+}
+
 fn parse_ingest_json(raw: &str) -> Result<IngestLlmJson> {
-    let trimmed = raw.trim();
-    let fenced = strip_json_fence(trimmed);
+    let trimmed = preprocess_model_json(raw);
+    let fenced = strip_json_fence(&trimmed);
 
     let mut last_err: Option<serde_json::Error> = None;
 
-    for candidate in [fenced.as_str(), trimmed] {
+    for candidate in [fenced.as_str(), trimmed.as_str()] {
         match serde_json::from_str::<IngestLlmJson>(candidate) {
             Ok(v) => return Ok(v),
             Err(e) => last_err = Some(e),
@@ -144,13 +152,91 @@ fn parse_ingest_json(raw: &str) -> Result<IngestLlmJson> {
     }
 }
 
+/// LLMs often emit URL-safe Base64, omit `=` padding, wrap lines, or prefix `data:...;base64,`.
+/// Try several decodings before failing.
+fn decode_body_markdown_b64_field(raw: &str) -> Result<Vec<u8>> {
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let after_prefix = if let Some(i) = compact.find(";base64,") {
+        compact[i + ";base64,".len()..].to_string()
+    } else {
+        compact
+    };
+    let compact: String = after_prefix
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if compact.is_empty() {
+        anyhow::bail!("body_markdown_b64 is empty");
+    }
+
+    let sanitized: String = compact
+        .chars()
+        .filter(|c| {
+            matches!(
+                c,
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '+' | '/' | '=' | '-' | '_'
+            )
+        })
+        .collect();
+
+    fn pad_base64_to_length_multiple_of_4(s: &str) -> String {
+        let rem = s.len() % 4;
+        if rem == 0 {
+            s.to_string()
+        } else {
+            format!("{}{}", s, "=".repeat(4 - rem))
+        }
+    }
+
+    fn try_decode_one_block(cand: &[u8]) -> Option<Vec<u8>> {
+        if cand.is_empty() {
+            return None;
+        }
+        if let Ok(b) = general_purpose::STANDARD.decode(cand) {
+            return Some(b);
+        }
+        if let Ok(b) = general_purpose::STANDARD_NO_PAD.decode(cand) {
+            return Some(b);
+        }
+        if let Ok(b) = general_purpose::URL_SAFE.decode(cand) {
+            return Some(b);
+        }
+        general_purpose::URL_SAFE_NO_PAD.decode(cand).ok()
+    }
+
+    let mut bases: Vec<&str> = vec![compact.as_str()];
+    if sanitized != compact && !sanitized.is_empty() {
+        bases.push(sanitized.as_str());
+    }
+    let mut tried: Vec<String> = Vec::new();
+    for base in bases {
+        tried.push(base.to_string());
+        let padded = pad_base64_to_length_multiple_of_4(base);
+        if padded != base {
+            tried.push(padded);
+        }
+    }
+
+    let mut seen = std::collections::HashSet::<String>::new();
+    tried.retain(|s| seen.insert(s.clone()));
+
+    for cand in tried {
+        if let Some(bytes) = try_decode_one_block(cand.as_bytes()) {
+            return Ok(bytes);
+        }
+    }
+
+    anyhow::bail!(
+        "invalid base64: tried STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD with whitespace stripped, optional data URL prefix removed, non-alphabet chars stripped, and padding to a multiple of 4"
+    )
+}
+
 fn resolve_ingest_body(parsed: &IngestLlmJson) -> Result<String> {
     if let Some(ref b64) = parsed.body_markdown_b64 {
-        let compact: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
-        if !compact.is_empty() {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(compact.as_bytes())
-                .context("decode body_markdown_b64")?;
+        let non_ws: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+        if !non_ws.is_empty() {
+            let bytes =
+                decode_body_markdown_b64_field(b64).context("decode body_markdown_b64")?;
             return String::from_utf8(bytes).context("body_markdown_b64 is not valid UTF-8");
         }
     }
@@ -758,7 +844,7 @@ where
             .map(|t| format!("Track namespace: {t}. Keep this identity explicit in title/body and include tag track:{t}."))
             .unwrap_or_else(|| "Track namespace: unknown/inbox. Infer a concise domain tag when obvious.".into());
         let sys = format!(
-            "{}\n\nYou output ONLY valid JSON (no markdown fences). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown_b64 (REQUIRED: standard Base64 of UTF-8 for the wiki markdown body WITHOUT YAML frontmatter — use this for the full body so JSON stays valid), body_markdown (optional; only if body is tiny with no quotes or code fences), tags (string array), glossary_patch (string or empty).\n\n{}\n{}",
+            "{}\n\nYou output ONLY valid JSON (no markdown fences, no commentary). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown_b64 (REQUIRED: standard Base64 of UTF-8 for the wiki markdown body WITHOUT YAML frontmatter — include the ENTIRE article here: headings, bullet lists, ```mermaid``` blocks, ```yaml```/```code``` fences, Markdown tables, and inline code so JSON never contains raw fence or quote characters from the article), body_markdown (always use empty string \"\" — do not put article text here), tags (string array), glossary_patch (string; use \"\" if none).\n\n{}\n{}",
             tier_hint,
             "Integrate with existing wiki style per schema.",
             track_hint
@@ -774,7 +860,7 @@ where
             text.chars().take(48_000).collect::<String>()
         );
 
-        let messages = vec![
+        let mut round_messages: Vec<LlmMessage> = vec![
             LlmMessage {
                 role: "system".into(),
                 content: sys,
@@ -793,21 +879,17 @@ where
             relative_path: Some(rel.clone()),
         });
 
-        let parsed = match complete_chat(
-            &provider,
-            cfg,
-            &messages,
-            ChatCompleteOptions {
-                json_response: true,
-            },
-        )
-        .await
-        {
-            Ok(raw) => match parse_ingest_json(&raw) {
-                Ok(p) => p,
+        let ingest_opts = ChatCompleteOptions {
+            json_response: true,
+        };
+
+        let mut parsed_opt: Option<IngestLlmJson> = None;
+        for attempt in 0u32..2u32 {
+            let raw = match complete_chat(&provider, cfg, &round_messages, ingest_opts.clone()).await
+            {
+                Ok(r) => r,
                 Err(e) => {
-                    let snippet: String = raw.chars().take(500).collect();
-                    let detail = format!("LLM JSON: {}; model output (truncated): {}", e, snippet);
+                    let detail = format!("LLM: {}", e);
                     on_progress(IngestProgressPayload {
                         phase: "error".into(),
                         message: detail.clone(),
@@ -820,25 +902,57 @@ where
                         status: "error".into(),
                         detail: Some(detail),
                     });
-                    continue;
+                    parsed_opt = None;
+                    break;
                 }
-            },
-            Err(e) => {
-                let detail = format!("LLM: {}", e);
-                on_progress(IngestProgressPayload {
-                    phase: "error".into(),
-                    message: detail.clone(),
-                    current: Some(current_i),
-                    total: Some(total_n),
-                    relative_path: Some(rel.clone()),
-                });
-                results.push(FileIngestResult {
-                    relative_raw_path: rel.clone(),
-                    status: "error".into(),
-                    detail: Some(detail),
-                });
-                continue;
+            };
+
+            match parse_ingest_json(&raw) {
+                Ok(p) => {
+                    parsed_opt = Some(p);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 1 {
+                        let snippet: String = raw.chars().take(500).collect();
+                        let detail =
+                            format!("LLM JSON: {}; model output (truncated): {}", e, snippet);
+                        on_progress(IngestProgressPayload {
+                            phase: "error".into(),
+                            message: detail.clone(),
+                            current: Some(current_i),
+                            total: Some(total_n),
+                            relative_path: Some(rel.clone()),
+                        });
+                        results.push(FileIngestResult {
+                            relative_raw_path: rel.clone(),
+                            status: "error".into(),
+                            detail: Some(detail),
+                        });
+                        parsed_opt = None;
+                        break;
+                    }
+                    round_messages.push(LlmMessage {
+                        role: "assistant".into(),
+                        content: raw,
+                    });
+                    round_messages.push(LlmMessage {
+                        role: "user".into(),
+                        content: "That reply was not valid JSON or failed parsing. Output ONLY one JSON object (no markdown fences). Put the full wiki markdown article ONLY in body_markdown_b64 as standard Base64 of UTF-8 (this must include any ```mermaid``` diagrams, tables, and fenced code from the source). Set body_markdown to the empty string \"\". Do not place article text, backticks, or raw newlines inside any JSON string except inside the base64 alphabet for body_markdown_b64. Required top-level keys: slug, title, one_line_summary, body_markdown_b64, body_markdown, tags, glossary_patch.".into(),
+                    });
+                    on_progress(IngestProgressPayload {
+                        phase: "llm".into(),
+                        message: "Retrying model (fix JSON)…".into(),
+                        current: Some(current_i),
+                        total: Some(total_n),
+                        relative_path: Some(rel.clone()),
+                    });
+                }
             }
+        }
+
+        let Some(parsed) = parsed_opt else {
+            continue;
         };
 
         let body_markdown = match resolve_ingest_body(&parsed) {

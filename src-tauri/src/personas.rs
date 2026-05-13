@@ -10,6 +10,7 @@ pub const ID_PRODUCT_OWNER: &str = "product_owner";
 pub const ID_TESTER: &str = "tester";
 pub const ID_ARCHITECT: &str = "architect";
 pub const ID_TECHNICAL_MANAGER: &str = "technical_manager";
+pub const ID_SMALL_BUSINESS_OWNER: &str = "small_business_owner";
 pub const ID_STUDENT: &str = "student";
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +58,10 @@ pub fn all_personas() -> Vec<PersonaMeta> {
             label: "Technical manager".into(),
         },
         PersonaMeta {
+            id: ID_SMALL_BUSINESS_OWNER.into(),
+            label: "Small business owner".into(),
+        },
+        PersonaMeta {
             id: ID_STUDENT.into(),
             label: "Student".into(),
         },
@@ -86,6 +91,7 @@ pub fn normalize_chat_persona(raw: &str) -> &'static str {
         ID_TESTER => ID_TESTER,
         ID_ARCHITECT => ID_ARCHITECT,
         ID_TECHNICAL_MANAGER => ID_TECHNICAL_MANAGER,
+        ID_SMALL_BUSINESS_OWNER => ID_SMALL_BUSINESS_OWNER,
         ID_STUDENT => ID_STUDENT,
         ID_WIKI_MAINTAINER | "" => ID_WIKI_MAINTAINER,
         _ => ID_WIKI_MAINTAINER,
@@ -143,6 +149,7 @@ pub fn persona_label_for_id(id: &str) -> &'static str {
         ID_TESTER => "Tester / QA",
         ID_ARCHITECT => "Architect",
         ID_TECHNICAL_MANAGER => "Technical manager",
+        ID_SMALL_BUSINESS_OWNER => "Small business owner",
         ID_STUDENT => "Student",
         _ => "Wiki maintainer",
     }
@@ -172,6 +179,7 @@ fn fragment_for_id(id: &str, student_grade_token: Option<&str>) -> String {
         ID_TESTER => "You are assisting as a **tester / QA**: think in terms of scenarios, edge cases, negative paths, repro steps, and testability. Call out missing information needed to validate behavior.".into(),
         ID_ARCHITECT => "You are assisting as a **software architect**: emphasize boundaries, interfaces, non-functional requirements, consistency, and evolution of the system. Prefer diagrams-in-words when helpful.".into(),
         ID_TECHNICAL_MANAGER => "You are assisting as a **technical manager**: balance delivery, risk, dependencies, and communication. Summarize decisions, owners, and next steps when appropriate.".into(),
+        ID_SMALL_BUSINESS_OWNER => "You are assisting as a **small business owner**: prioritize practical outcomes, cash flow and customer impact, time constraints, and clear tradeoffs. Favor concise, actionable guidance; flag when professional legal, tax, or accounting advice is needed rather than guessing.".into(),
         ID_STUDENT => {
             let tok = student_grade_token.unwrap_or("9");
             let level = grade_display_label(tok);
