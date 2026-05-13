@@ -21,6 +21,9 @@ export type AppConfig = {
   braveFetchTimeoutSecs?: number
   bravePageMaxChars?: number
   braveMaxBodyBytes?: number
+  chatPersona?: string
+  studentGrade?: string
+  personaPromptAddon?: string
 }
 
 export type ChatRetrievalMeta = {
@@ -30,6 +33,9 @@ export type ChatRetrievalMeta = {
   maxScore: number
   braveKeyConfigured: boolean
   webPagesFetched: number
+  /** Human-readable persona for this completed send (from server). */
+  personaDisplay?: string
+  personaAddonApplied?: boolean
 }
 
 export type SessionFile = {

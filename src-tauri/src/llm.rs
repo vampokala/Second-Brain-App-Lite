@@ -2,8 +2,10 @@ use crate::config::AppConfig;
 use crate::secrets;
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmMessage {
@@ -80,11 +82,57 @@ pub async fn complete_chat(
     match provider {
         "ollama" => ollama_complete(cfg, messages, false, opts.json_response).await,
         "openai" => openai_complete(cfg, messages, false, opts.json_response).await,
-        "anthropic" => anthropic_complete(cfg, messages).await,
+        "anthropic" => anthropic_complete(cfg, messages, opts.json_response).await,
         "compatible" => openai_compatible_complete(cfg, messages, false, opts.json_response).await,
         "gemini" => gemini_complete(cfg, messages, opts.json_response).await,
         _ => Err(anyhow!("unknown provider {}", provider)),
     }
+}
+
+/// JSON Schema for Lite wiki ingest (shared by OpenAI structured outputs + Anthropic `output_config`).
+fn lite_ingest_json_schema_core() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string"},
+            "title": {"type": "string"},
+            "one_line_summary": {"type": "string"},
+            "body_markdown_b64": {"type": "string"},
+            "body_markdown": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "glossary_patch": {"type": "string"}
+        },
+        "required": [
+            "slug",
+            "title",
+            "one_line_summary",
+            "body_markdown_b64",
+            "body_markdown",
+            "tags",
+            "glossary_patch"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn openai_ingest_structured_response_format() -> serde_json::Value {
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "lite_ingest_wiki",
+            "strict": true,
+            "schema": lite_ingest_json_schema_core()
+        }
+    })
+}
+
+fn anthropic_ingest_output_config() -> serde_json::Value {
+    json!({
+        "format": {
+            "type": "json_schema",
+            "schema": lite_ingest_json_schema_core()
+        }
+    })
 }
 
 async fn ollama_complete(
@@ -125,36 +173,101 @@ async fn openai_complete(
 ) -> Result<String> {
     let key = blocking_secret(|| secrets::resolve_openai_key()).await?;
     let url = "https://api.openai.com/v1/chat/completions";
+    let model_id = openai_chat_model_for_api(&cfg.openai_model);
     let mut body = json!({
-      "model": openai_chat_model_for_api(&cfg.openai_model),
+      "model": model_id,
       "messages": messages,
-      "temperature": 0.2,
       "stream": stream,
     });
+    if !openai_chat_omits_temperature_parameter(&model_id) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("temperature".into(), json!(0.2));
+        }
+    }
     if json_response {
         if let Some(obj) = body.as_object_mut() {
             obj.insert(
                 "response_format".into(),
-                json!({ "type": "json_object" }),
+                openai_ingest_structured_response_format(),
             );
         }
     }
+
     let c = client()?;
-    let res = c
-        .post(url)
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .await?;
-    if !res.status().is_success() {
+    let mut rate_retries = 0u32;
+    let mut body_fix_retries = 0u8;
+
+    loop {
+        let res = c
+            .post(url)
+            .bearer_auth(&key)
+            .json(&body)
+            .send()
+            .await?;
+
+        if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let t = res.text().await.unwrap_or_default();
+            rate_retries += 1;
+            if rate_retries > 16 {
+                return Err(anyhow!("openai error (rate limited): {}", t));
+            }
+            let wait = openai_retry_after_ms_from_error_body(&t)
+                .unwrap_or(1500u64.saturating_mul(rate_retries as u64))
+                .saturating_add(150)
+                .min(120_000);
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+            continue;
+        }
+
+        if res.status().is_success() {
+            let v: OpenAiResp = res.json().await?;
+            return Ok(v.choices
+                .get(0)
+                .and_then(|c| c.message.content.clone())
+                .unwrap_or_default());
+        }
+
+        let status = res.status();
         let t = res.text().await.unwrap_or_default();
+        let t_lower = t.to_ascii_lowercase();
+
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && body.get("temperature").is_some()
+            && t_lower.contains("temperature")
+            && (t_lower.contains("unsupported") || t_lower.contains("unsupported_value"))
+            && body_fix_retries < 4
+        {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("temperature");
+            }
+            body_fix_retries += 1;
+            continue;
+        }
+
+        if json_response
+            && status == reqwest::StatusCode::BAD_REQUEST
+            && !openai_response_format_is_plain_json_object(&body)
+            && body_fix_retries < 8
+        {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert(
+                    "response_format".into(),
+                    json!({ "type": "json_object" }),
+                );
+            }
+            body_fix_retries += 1;
+            continue;
+        }
+
         return Err(anyhow!("openai error: {}", t));
     }
-    let v: OpenAiResp = res.json().await?;
-    Ok(v.choices
-        .get(0)
-        .and_then(|c| c.message.content.clone())
-        .unwrap_or_default())
+}
+
+fn openai_response_format_is_plain_json_object(body: &serde_json::Value) -> bool {
+    body.get("response_format")
+        .and_then(|rf| rf.get("type"))
+        .and_then(|t| t.as_str())
+        == Some("json_object")
 }
 
 async fn openai_compatible_complete(
@@ -166,31 +279,88 @@ async fn openai_compatible_complete(
     let key = blocking_secret(|| secrets::resolve_compatible_key()).await?;
     let base = cfg.compatible_base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base);
+    let model_id = openai_chat_model_for_api(&cfg.compatible_model);
     let mut body = json!({
-      "model": openai_chat_model_for_api(&cfg.compatible_model),
+      "model": model_id,
       "messages": messages,
-      "temperature": 0.2,
       "stream": stream,
     });
+    if !openai_chat_omits_temperature_parameter(&model_id) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("temperature".into(), json!(0.2));
+        }
+    }
     if json_response {
         if let Some(obj) = body.as_object_mut() {
             obj.insert(
                 "response_format".into(),
-                json!({ "type": "json_object" }),
+                openai_ingest_structured_response_format(),
             );
         }
     }
     let c = client()?;
-    let res = c.post(&url).bearer_auth(key).json(&body).send().await?;
-    if !res.status().is_success() {
+    let mut rate_retries = 0u32;
+    let mut body_fix_retries = 0u8;
+
+    loop {
+        let res = c.post(&url).bearer_auth(&key).json(&body).send().await?;
+
+        if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let t = res.text().await.unwrap_or_default();
+            rate_retries += 1;
+            if rate_retries > 16 {
+                return Err(anyhow!("compatible openai error (rate limited): {}", t));
+            }
+            let wait = openai_retry_after_ms_from_error_body(&t)
+                .unwrap_or(1500u64.saturating_mul(rate_retries as u64))
+                .saturating_add(150)
+                .min(120_000);
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+            continue;
+        }
+
+        if res.status().is_success() {
+            let v: OpenAiResp = res.json().await?;
+            return Ok(v.choices
+                .get(0)
+                .and_then(|c| c.message.content.clone())
+                .unwrap_or_default());
+        }
+
+        let status = res.status();
         let t = res.text().await.unwrap_or_default();
+        let t_lower = t.to_ascii_lowercase();
+
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && body.get("temperature").is_some()
+            && t_lower.contains("temperature")
+            && (t_lower.contains("unsupported") || t_lower.contains("unsupported_value"))
+            && body_fix_retries < 4
+        {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("temperature");
+            }
+            body_fix_retries += 1;
+            continue;
+        }
+
+        if json_response
+            && status == reqwest::StatusCode::BAD_REQUEST
+            && !openai_response_format_is_plain_json_object(&body)
+            && body_fix_retries < 8
+        {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert(
+                    "response_format".into(),
+                    json!({ "type": "json_object" }),
+                );
+            }
+            body_fix_retries += 1;
+            continue;
+        }
+
         return Err(anyhow!("compatible openai error: {}", t));
     }
-    let v: OpenAiResp = res.json().await?;
-    Ok(v.choices
-        .get(0)
-        .and_then(|c| c.message.content.clone())
-        .unwrap_or_default())
 }
 
 /// Maps retired Chat Completions `-latest` pointers and noisy aliases to stable OpenAI model ids.
@@ -224,6 +394,24 @@ fn openai_chat_model_for_api(raw: &str) -> String {
             trimmed.to_string()
         }
     }
+}
+
+/// GPT-5 family and several reasoning-style Chat Completions models reject custom `temperature`
+/// (OpenAI returns `unsupported_value` unless you omit the field and use the API default).
+fn openai_chat_omits_temperature_parameter(model_id: &str) -> bool {
+    let m = model_id.trim().to_ascii_lowercase();
+    if m.contains("gpt-5") {
+        return true;
+    }
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
+
+/// Parse "Please try again in 645ms" from OpenAI TPM / RPM error bodies.
+fn openai_retry_after_ms_from_error_body(text: &str) -> Option<u64> {
+    let re = Regex::new(r"(?i)try again in\s+(\d+)\s*ms").ok()?;
+    re.captures(text)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<u64>().ok())
 }
 
 /// Maps retired Claude 3 / `-latest` aliases to current Messages API model ids (see Anthropic model docs).
@@ -345,7 +533,11 @@ async fn gemini_complete(
     Ok(gemini_extract_answer(&data))
 }
 
-async fn anthropic_complete(cfg: &AppConfig, messages: &[LlmMessage]) -> Result<String> {
+async fn anthropic_complete(
+    cfg: &AppConfig,
+    messages: &[LlmMessage],
+    json_response: bool,
+) -> Result<String> {
     let key = blocking_secret(|| secrets::resolve_anthropic_key()).await?;
     let mut system = String::new();
     let mut anth_msgs = vec![];
@@ -362,23 +554,50 @@ async fn anthropic_complete(cfg: &AppConfig, messages: &[LlmMessage]) -> Result<
     }
     let url = "https://api.anthropic.com/v1/messages";
     let model = anthropic_model_for_api(&cfg.anthropic_model);
-    let body = json!({
+    let max_tokens = if json_response { 32_768 } else { 8192 };
+    let mut body = json!({
       "model": model,
-      "max_tokens": 8192,
+      "max_tokens": max_tokens,
       "system": system.trim(),
       "messages": anth_msgs,
     });
+    if json_response {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("output_config".into(), anthropic_ingest_output_config());
+        }
+    }
     let c = client()?;
-    let res = c
+    let mut res = c
         .post(url)
-        .header("x-api-key", key)
+        .header("x-api-key", &key)
         .header("anthropic-version", "2023-06-01")
         .json(&body)
         .send()
         .await?;
     if !res.status().is_success() {
+        let status = res.status();
         let t = res.text().await.unwrap_or_default();
-        return Err(anyhow!("anthropic error: {}", t));
+        if json_response && status == reqwest::StatusCode::BAD_REQUEST {
+            body = json!({
+              "model": model,
+              "max_tokens": max_tokens,
+              "system": system.trim(),
+              "messages": anth_msgs,
+            });
+            res = c
+                .post(url)
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await?;
+            if !res.status().is_success() {
+                let t2 = res.text().await.unwrap_or_default();
+                return Err(anyhow!("anthropic error: {}", t2));
+            }
+        } else {
+            return Err(anyhow!("anthropic error: {}", t));
+        }
     }
     let v: AnthropicResp = res.json().await?;
     let text: String = v
@@ -411,7 +630,7 @@ where
             Ok(())
         }
         "anthropic" => {
-            let full = anthropic_complete(cfg, messages).await?;
+            let full = anthropic_complete(cfg, messages, false).await?;
             on_delta(full);
             Ok(())
         }
