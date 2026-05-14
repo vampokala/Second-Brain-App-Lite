@@ -33,6 +33,7 @@ No database. No cloud sync. Everything is plain Markdown on your disk, readable 
 | 🎨 **Light / Dark / System** | Persistent theme preference |
 | 📋 **Paste & Ingest** | Drop raw text directly into the app without saving a file first |
 | 🧠 **Rolling Memory** | Summarize sessions into a persistent memory file that enriches future chats |
+| 🏢 **Corporate / Cursor-assisted** | Prompt-pack + paste-back JSON ingest; optional local Cursor transcript import — [docs](./docs/corporate-cursor-ingest.md) |
 | 🗂️ **Session management** | Collapsible session list with per-session delete |
 | 🎭 **Chat personas** | Role-aware tone (incl. student grade K–12) plus optional custom instructions — see [Chat personas](./docs/chat-personas.md) |
 
@@ -40,6 +41,8 @@ No database. No cloud sync. Everything is plain Markdown on your disk, readable 
 
 ## Documentation
 
+- [Corporate / Cursor-assisted ingest](./docs/corporate-cursor-ingest.md) — restricted-LLM environments, local transcript archive, three-way import.
+- [Tauri FS note (Cursor archive)](./docs/tauri-fs-cursor-archive.md) — why `default.json` does not need extra scopes for Rust-side reads.
 - [Chat personas](./docs/chat-personas.md) — configure role, student grade, and optional extra instructions for every chat.
 
 ---
@@ -106,6 +109,14 @@ flowchart TD
 ```
 
 The LLM returns structured JSON (`slug`, `title`, `one_line_summary`, `body_markdown_b64` / empty `body_markdown`, `tags`, optional `glossary_patch`). Toggle **Full tier** for richer glossary prompts.
+
+### Corporate / Cursor-assisted ingest and local Cursor archive
+
+When your workplace **blocks direct LLM provider APIs** but allows **Cursor-hosted models**, use **Ingest → Cursor-assisted**: the app saves content to `raw/`, builds a **prompt pack** (schema + wiki excerpts + raw text) for you to paste into **Cursor Chat**, then you paste the model’s JSON back and **commit** without Lite calling any provider.
+
+Use **Import Cursor chat archive** to read local Cursor `workspaceStorage` `*.jsonl` transcripts (MVP: `state.vscdb` is not read). You can **append an excerpt to the prompt pack**, **stage a wiki page** (stub ingest JSON + same commit path), or **import a Lite chat session**. See **[Corporate / Cursor-assisted ingest](./docs/corporate-cursor-ingest.md)** for the full workflow, privacy posture, and transcript format notes.
+
+Rust backend reads those paths with normal process `std::fs` permissions — no extra `plugin-fs` entry is required for these commands; see **[Tauri / filesystem note](./docs/tauri-fs-cursor-archive.md)** if you later expose the same paths to the **web** frontend.
 
 ### Supported raw file types
 

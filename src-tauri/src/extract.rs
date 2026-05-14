@@ -7,10 +7,11 @@ use crate::extract_notebook;
 use crate::extract_pptx;
 use crate::extract_tabular;
 use anyhow::{Context, Result};
-use docx::document::{BodyContent, Paragraph, TableCellContent};
-use docx::DocxFile;
-use std::io::Cursor;
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use std::io::{Cursor, Read};
 use std::path::Path;
+use zip::read::ZipArchive;
 
 const MAX_TABULAR_COLS: usize = 32;
 const IPYNB_OUTPUT_LINES: usize = 40;
@@ -290,53 +291,67 @@ fn normalize_extracted_text(s: &str) -> String {
     out.trim().to_string()
 }
 
-fn paragraph_plain(p: &Paragraph<'_>) -> String {
-    p.iter_text().map(|c| c.as_ref()).collect::<Vec<_>>().concat()
-}
-
+/// Plain text from a `.docx` (OOXML) using `word/document.xml` — avoids the unmaintained `docx`
+/// crate on crates.io (future-incompatibility warnings under newer Rust).
 fn extract_docx_plain(bytes: &[u8]) -> Result<String> {
-    let file = DocxFile::from_reader(Cursor::new(bytes))
-        .map_err(|e| anyhow::anyhow!("read docx archive: {:?}", e))?;
-    let doc = file
-        .parse()
-        .map_err(|e| anyhow::anyhow!("parse docx XML: {:?}", e))?;
-    Ok(collect_body_text(&doc.document.body.content))
-}
-
-fn collect_body_text(contents: &[BodyContent<'_>]) -> String {
-    let mut blocks = Vec::new();
-    for item in contents {
-        match item {
-            BodyContent::Paragraph(p) => {
-                let line = paragraph_plain(p);
-                if !line.trim().is_empty() {
-                    blocks.push(line);
-                }
-            }
-            BodyContent::Table(t) => {
-                for row in &t.rows {
-                    let mut cells = Vec::new();
-                    for cell in &row.cells {
-                        let mut cell_parts = Vec::new();
-                        for tc in &cell.content {
-                            let TableCellContent::Paragraph(p) = tc;
-                            let s = paragraph_plain(p);
-                            if !s.trim().is_empty() {
-                                cell_parts.push(s);
-                            }
-                        }
-                        if !cell_parts.is_empty() {
-                            cells.push(cell_parts.join(" "));
-                        }
-                    }
-                    if !cells.is_empty() {
-                        blocks.push(cells.join("\t"));
-                    }
-                }
-            }
-        }
+    let mut archive =
+        ZipArchive::new(Cursor::new(bytes)).map_err(|e| anyhow::anyhow!("read docx zip: {}", e))?;
+    let mut xml = String::new();
+    {
+        let mut f = archive
+            .by_name("word/document.xml")
+            .map_err(|e| anyhow::anyhow!("word/document.xml: {}", e))?;
+        f.read_to_string(&mut xml)
+            .map_err(|e| anyhow::anyhow!("read document.xml: {}", e))?;
     }
-    blocks.join("\n\n")
+
+    let mut reader = Reader::from_str(&xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    // Stack: true when the open element is `w:t` (text).
+    let mut stack: Vec<bool> = Vec::new();
+    let mut out = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                match e.local_name().as_ref() {
+                    b"tab" => out.push('\t'),
+                    b"br" => out.push('\n'),
+                    _ => {}
+                }
+                stack.push(e.local_name().as_ref() == b"t");
+            }
+            Ok(Event::Empty(ref e)) => match e.local_name().as_ref() {
+                b"tab" => out.push('\t'),
+                b"br" => out.push('\n'),
+                _ => {}
+            },
+            Ok(Event::Text(ref e)) => {
+                if stack.last().copied().unwrap_or(false) {
+                    let txt = e
+                        .unescape()
+                        .map_err(|err| anyhow::anyhow!("xml text: {}", err))?;
+                    out.push_str(&txt);
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                if e.local_name().as_ref() == b"p" {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                }
+                let _ = stack.pop();
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => anyhow::bail!("word/document.xml parse: {}", e),
+            Ok(_) => {}
+        }
+        buf.clear();
+    }
+
+    Ok(normalize_extracted_text(&out))
 }
 
 #[cfg(test)]

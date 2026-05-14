@@ -1,6 +1,7 @@
 mod atomic;
 mod chat;
 mod config;
+mod cursor_archive;
 mod extract;
 mod extract_diagrams;
 mod extract_image;
@@ -19,8 +20,15 @@ mod web_compile;
 mod wiki;
 
 use config::{load_config, normalize_llm_provider, save_config, resolved_triple, AppConfig};
-use ingest::{run_ingest, FileIngestResult, IngestProgressPayload, TrackInference};
-use serde::Deserialize;
+use cursor_archive::{
+    filter_workspaces, parse_excerpt, reveal_path_in_os, ChatExcerpt, CursorTranscriptFile,
+    CursorWorkspaceEntry, WorkspaceFilter,
+};
+use ingest::{
+    commit_parsed_ingest_to_wiki, preview_ingest_commit, run_ingest, build_cursor_assist_prompt_pack,
+    FileIngestResult, IngestCommitPreview, IngestProgressPayload, TrackInference,
+};
+use serde::{Deserialize, Serialize};
 use sessions::{delete_session, list_sessions, load_session, save_session, SessionFile};
 use std::path::PathBuf;
 use std::sync::{
@@ -613,6 +621,209 @@ fn infer_track_cmd(cfg: AppConfig, payload: InferTrackPayload) -> Result<TrackIn
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareCursorAssistResponse {
+    pub raw_rel: String,
+    pub prompt_pack: String,
+}
+
+/// Save pasted content to `raw/`, then return the prompt pack for Cursor Chat (no LLM in Lite).
+#[tauri::command]
+fn prepare_cursor_assisted_ingest(
+    cfg: AppConfig,
+    full_tier: bool,
+    payload: IngestPastePayload,
+) -> Result<PrepareCursorAssistResponse, String> {
+    let inferred = if let Some(t) = payload.track_id.as_deref() {
+        TrackInference {
+            track_id: Some(ingest::sanitize_track_id(t)),
+            confidence: 1.0,
+            reason: "User selected track".into(),
+        }
+    } else if payload.auto_detect_track {
+        ingest::infer_track_for_content_detailed(&cfg, &payload.content, None)
+            .map_err(|e| e.to_string())?
+    } else {
+        TrackInference {
+            track_id: None,
+            confidence: 0.0,
+            reason: "No track selected".into(),
+        }
+    };
+    let chosen_track = inferred.track_id.clone();
+    let rel = ingest::save_paste_to_raw(
+        &cfg,
+        &payload.content,
+        payload.file_stem.as_deref(),
+        chosen_track.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+    let pack = build_cursor_assist_prompt_pack(&cfg, &rel, full_tier).map_err(|e| e.to_string())?;
+    Ok(PrepareCursorAssistResponse {
+        raw_rel: rel,
+        prompt_pack: pack,
+    })
+}
+
+#[tauri::command]
+fn preview_cursor_assisted_commit_cmd(
+    cfg: AppConfig,
+    raw_rel: String,
+    pasted_model_json: String,
+) -> Result<IngestCommitPreview, String> {
+    preview_ingest_commit(&cfg, &raw_rel, &pasted_model_json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn commit_cursor_assisted_ingest_cmd(
+    app: tauri::AppHandle,
+    cfg: AppConfig,
+    raw_rel: String,
+    pasted_model_json: String,
+) -> Result<FileIngestResult, String> {
+    let preview = preview_ingest_commit(&cfg, &raw_rel, &pasted_model_json).map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "ingest-progress",
+        IngestProgressPayload {
+            phase: "commit".into(),
+            message: format!(
+                "Writing wiki/{} from Cursor-assisted JSON",
+                preview.wiki_source_rel
+            ),
+            current: None,
+            total: None,
+            relative_path: Some(raw_rel.clone()),
+        },
+    );
+    commit_parsed_ingest_to_wiki(&cfg, &raw_rel, &pasted_model_json, "cursor-assisted")
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorArchiveDiscoverQuery {
+    #[serde(default)]
+    pub hash_contains: Option<String>,
+    #[serde(default)]
+    pub max_age_days: Option<u32>,
+    #[serde(default)]
+    pub vault_path_contains: Option<String>,
+}
+
+#[tauri::command]
+fn cursor_archive_discover_cmd(
+    query: Option<CursorArchiveDiscoverQuery>,
+) -> Result<Vec<CursorWorkspaceEntry>, String> {
+    let entries = cursor_archive::discover_workspaces().map_err(|e| e.to_string())?;
+    let filtered = if let Some(q) = query {
+        filter_workspaces(
+            entries,
+            &WorkspaceFilter {
+                hash_contains: q.hash_contains,
+                max_age_days: q.max_age_days,
+                vault_path_contains: q.vault_path_contains,
+            },
+        )
+    } else {
+        entries
+    };
+    Ok(filtered)
+}
+
+#[tauri::command]
+fn cursor_archive_list_cmd(workspace_abs: String) -> Result<Vec<CursorTranscriptFile>, String> {
+    cursor_archive::list_transcripts(&workspace_abs).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cursor_archive_preview_cmd(path: String, max_chars: usize) -> Result<ChatExcerpt, String> {
+    parse_excerpt(&path, max_chars).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cursor_archive_reveal_cmd(path: String) -> Result<(), String> {
+    reveal_path_in_os(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cursor_archive_commit_excerpt_wiki_cmd(
+    app: tauri::AppHandle,
+    cfg: AppConfig,
+    transcript_path: String,
+    max_chars: usize,
+    track_id: Option<String>,
+    title_stem: Option<String>,
+) -> Result<FileIngestResult, String> {
+    let ex = parse_excerpt(&transcript_path, max_chars).map_err(|e| e.to_string())?;
+    let md = cursor_archive::render_excerpt_markdown(&ex);
+    let stem = title_stem
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("cursor-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
+    let track = track_id
+        .as_deref()
+        .map(ingest::sanitize_track_id)
+        .filter(|s| !s.is_empty());
+    let raw_rel =
+        ingest::save_paste_to_raw(&cfg, &md, Some(&stem), track.as_deref()).map_err(|e| e.to_string())?;
+    let slug = std::path::Path::new(&raw_rel)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "cursor-import".into());
+    let title = ex.title.clone();
+    let tags = vec!["cursor-archive".to_string(), "source".to_string()];
+    let json = ingest::stub_ingest_json_for_markdown_body(
+        &slug,
+        &title,
+        "Imported Cursor transcript excerpt (local archive)",
+        &md,
+        &tags,
+    );
+    let _ = app.emit(
+        "ingest-progress",
+        IngestProgressPayload {
+            phase: "cursor-archive".into(),
+            message: format!("Committing wiki from excerpt → raw/{raw_rel}"),
+            current: None,
+            total: None,
+            relative_path: Some(raw_rel.clone()),
+        },
+    );
+    commit_parsed_ingest_to_wiki(&cfg, &raw_rel, &json, "cursor-archive").map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cursor_archive_import_excerpt_session_cmd(
+    transcript_path: String,
+    max_chars: usize,
+) -> Result<SessionFile, String> {
+    let ex = parse_excerpt(&transcript_path, max_chars).map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    let messages: Vec<sessions::ChatMessage> = ex
+        .messages
+        .into_iter()
+        .map(|m| sessions::ChatMessage {
+            role: m.role,
+            content: m.text,
+            ts: now.clone(),
+        })
+        .collect();
+    let sess = SessionFile {
+        id: id.clone(),
+        title: ex.title,
+        created: now.clone(),
+        updated: now,
+        messages,
+    };
+    save_session(&sess).map_err(|e| e.to_string())?;
+    Ok(sess)
+}
+
 #[tauri::command]
 fn list_chat_sessions() -> Result<Vec<SessionFile>, String> {
     list_sessions().map_err(|e| e.to_string())
@@ -928,6 +1139,15 @@ pub fn run() {
             cancel_ingest_cmd,
             list_tracks_cmd,
             infer_track_cmd,
+            prepare_cursor_assisted_ingest,
+            preview_cursor_assisted_commit_cmd,
+            commit_cursor_assisted_ingest_cmd,
+            cursor_archive_discover_cmd,
+            cursor_archive_list_cmd,
+            cursor_archive_preview_cmd,
+            cursor_archive_reveal_cmd,
+            cursor_archive_commit_excerpt_wiki_cmd,
+            cursor_archive_import_excerpt_session_cmd,
             list_chat_sessions,
             load_chat_session,
             save_chat_session,
