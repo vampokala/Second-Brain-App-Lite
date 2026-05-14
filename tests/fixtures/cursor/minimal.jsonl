@@ -1,0 +1,2 @@
+{"role":"user","content":"Summarize the corporate wiki ingest plan in one paragraph."}
+{"role":"assistant","content":"The plan combines a Cursor-assisted paste loop for LLM output with a local archive adapter that discovers Cursor workspaceStorage JSONL transcripts, optional OS handoff for external tools, and routes excerpts into prompt packs, wiki source drafts, or Lite chat sessions."}

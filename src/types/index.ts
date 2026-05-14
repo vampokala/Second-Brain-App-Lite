@@ -81,6 +81,45 @@ export type TrackInference = {
   reason: string
 }
 
+export type PrepareCursorAssistResponse = {
+  rawRel: string
+  promptPack: string
+}
+
+export type IngestCommitPreview = {
+  title: string
+  slug: string
+  oneLineSummary: string
+  tags: string[]
+  trackId?: string | null
+  wikiSourceRel: string
+  rawRelativePath: string
+}
+
+export type CursorWorkspaceEntry = {
+  id: string
+  workspaceHash: string
+  projectSlug: string
+  absPath: string
+  modifiedMs?: number | null
+  folderHint?: string | null
+  hasStateVscdb: boolean
+}
+
+export type CursorTranscriptFile = {
+  name: string
+  absPath: string
+  modifiedMs?: number | null
+  sizeBytes: number
+}
+
+export type ChatExcerpt = {
+  title: string
+  sourcePath: string
+  messages: { role: string; text: string }[]
+  truncated: boolean
+}
+
 export type SchemaStatus = {
   claudeMd: boolean
   llmWikiMd: boolean

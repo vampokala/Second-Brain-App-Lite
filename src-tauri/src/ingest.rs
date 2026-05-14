@@ -127,7 +127,7 @@ fn preprocess_model_json(raw: &str) -> String {
         .to_string()
 }
 
-fn parse_ingest_json(raw: &str) -> Result<IngestLlmJson> {
+pub fn parse_ingest_json(raw: &str) -> Result<IngestLlmJson> {
     let trimmed = preprocess_model_json(raw);
     let fenced = strip_json_fence(&trimmed);
 
@@ -476,11 +476,21 @@ fn upsert_index_sources(index_content: &str, source_rel: &str, summary: &str, to
     )
 }
 
-fn append_log(wiki_dir: &Path, title: &str, source_rel: &str, today: &str) -> Result<()> {
+fn append_log(
+    wiki_dir: &Path,
+    title: &str,
+    source_rel: &str,
+    today: &str,
+    ingest_mode: Option<&str>,
+) -> Result<()> {
     let log_path = wiki_dir.join("log.md");
+    let mode_line = ingest_mode
+        .filter(|s| !s.trim().is_empty())
+        .map(|m| format!("Ingest mode: {m}\n\n"))
+        .unwrap_or_default();
     let entry = format!(
-        "\n## [{}] ingest | {}\n\nPages created: wiki/sources/{}.md\nPages updated: wiki/index.md, wiki/log.md\nKey additions: lite ingest summary page\n\n",
-        today, title, source_rel
+        "\n## [{}] ingest | {}\n\n{}Pages created: wiki/sources/{}.md\nPages updated: wiki/index.md, wiki/log.md\nKey additions: lite ingest summary page\n\n",
+        today, title, mode_line, source_rel
     );
     let mut prev = std::fs::read_to_string(&log_path).unwrap_or_default();
     prev.push_str(&entry);
@@ -497,6 +507,272 @@ fn maybe_patch_glossary(wiki_dir: &Path, patch: Option<&str>) -> Result<()> {
     body.push_str(p.trim());
     body.push('\n');
     atomic::atomic_write(&gp, body.as_bytes())
+}
+
+/// Maximum UTF-8 bytes of raw file text embedded in a Cursor-assisted prompt pack.
+const PROMPT_PACK_MAX_RAW_BYTES: usize = 400 * 1024;
+
+fn compute_ingest_slug(parsed: &IngestLlmJson, raw_path: &Path) -> String {
+    if parsed.slug.trim().is_empty() {
+        kebab_slug(raw_path)
+    } else {
+        parsed
+            .slug
+            .trim()
+            .replace('/', "-")
+            .replace('\\', "-")
+    }
+}
+
+/// Preview wiki commit fields from pasted model JSON (Cursor-assisted ingest).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestCommitPreview {
+    pub title: String,
+    pub slug: String,
+    pub one_line_summary: String,
+    pub tags: Vec<String>,
+    pub track_id: Option<String>,
+    /// Path under wiki/, e.g. `sources/inbox/my-page.md`
+    pub wiki_source_rel: String,
+    pub raw_relative_path: String,
+}
+
+pub fn preview_ingest_commit(cfg: &AppConfig, raw_rel: &str, model_json: &str) -> Result<IngestCommitPreview> {
+    let parsed = parse_ingest_json(model_json)?;
+    let _body = resolve_ingest_body(&parsed)?;
+    let (raw_dir, _, _) = resolved_triple(cfg)?;
+    let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
+    let raw_path = raw_dir.join(raw_rel);
+    if !raw_path.is_file() {
+        anyhow::bail!("raw file missing: {}", raw_path.display());
+    }
+    let slug = compute_ingest_slug(&parsed, &raw_path);
+    let track_id = track_from_rel(raw_rel);
+    let track_folder = track_id.clone().unwrap_or_else(|| "inbox".into());
+    Ok(IngestCommitPreview {
+        title: parsed.title.clone(),
+        slug: slug.clone(),
+        one_line_summary: parsed.one_line_summary.clone(),
+        tags: parsed.tags.clone(),
+        track_id,
+        wiki_source_rel: format!("sources/{track_folder}/{slug}.md"),
+        raw_relative_path: raw_rel.to_string(),
+    })
+}
+
+/// Write wiki page + index + log + optional glossary + manifest from validated ingest JSON.
+/// `ingest_mode` is recorded in `wiki/log.md` (e.g. `cursor-assisted`).
+pub fn commit_parsed_ingest_to_wiki(
+    cfg: &AppConfig,
+    raw_rel: &str,
+    model_json: &str,
+    ingest_mode: &str,
+) -> Result<FileIngestResult> {
+    let parsed = parse_ingest_json(model_json)?;
+    let body_markdown = resolve_ingest_body(&parsed)?;
+    let (raw_dir, wiki_dir, schema_dir) = resolved_triple(cfg)?;
+    let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
+    let wiki_dir = wiki_dir.canonicalize().unwrap_or(wiki_dir);
+    let _schema_dir = schema_dir.canonicalize().unwrap_or(schema_dir);
+    wiki::ensure_wiki_layout(&wiki_dir)?;
+
+    let raw_path = raw_dir.join(raw_rel);
+    let bytes =
+        std::fs::read(&raw_path).with_context(|| format!("read raw {}", raw_path.display()))?;
+    let hash = sha256_bytes(&bytes);
+
+    let slug = compute_ingest_slug(&parsed, &raw_path);
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let track_id = track_from_rel(raw_rel);
+
+    let fm = build_frontmatter(
+        &parsed.title,
+        raw_rel,
+        &parsed.tags,
+        track_id.as_deref(),
+        &today,
+    )?;
+    let page = format!("{}{}", fm, body_markdown);
+    let track_folder = track_id.clone().unwrap_or_else(|| "inbox".into());
+    let sources_dir = wiki_dir.join("sources").join(&track_folder);
+    std::fs::create_dir_all(&sources_dir)?;
+    let out_path = sources_dir.join(format!("{}.md", slug));
+    atomic::atomic_write(&out_path, page.as_bytes())
+        .with_context(|| format!("write {}", out_path.display()))?;
+
+    let index_path = wiki_dir.join("index.md");
+    let index_body = std::fs::read_to_string(&index_path).unwrap_or_default();
+    let source_rel = format!("{}/{}", track_folder, slug);
+    let new_index = upsert_index_sources(
+        &index_body,
+        &source_rel,
+        &parsed.one_line_summary,
+        &today,
+    );
+    atomic::atomic_write(&index_path, new_index.as_bytes())
+        .with_context(|| format!("write {}", index_path.display()))?;
+
+    append_log(
+        &wiki_dir,
+        &parsed.title,
+        &source_rel,
+        &today,
+        Some(ingest_mode),
+    )?;
+    maybe_patch_glossary(&wiki_dir, parsed.glossary_patch.as_deref())?;
+
+    let (src_sz, src_ms) = raw_file_stamp(&raw_path).unwrap_or((bytes.len() as u64, 0));
+    let mut manifest = crate::manifest::load_manifest_for(&raw_dir)?;
+    manifest.entries.insert(
+        raw_rel.to_string(),
+        ManifestEntry {
+            content_sha256: hash,
+            last_ingest_at: Utc::now().to_rfc3339(),
+            wiki_paths: vec![format!("sources/{}/{}.md", track_folder, slug)],
+            source_size: Some(src_sz),
+            source_mtime_ms: Some(src_ms),
+        },
+    );
+    crate::manifest::save_manifest_for(&raw_dir, &manifest)?;
+
+    let wrote = format!("sources/{}/{}.md", track_folder, slug);
+    Ok(FileIngestResult {
+        relative_raw_path: raw_rel.to_string(),
+        status: "ok".into(),
+        detail: Some(wrote),
+    })
+}
+
+/// Deterministic prompt pack for Cursor Chat (no LLM call from Lite).
+pub fn build_cursor_assist_prompt_pack(cfg: &AppConfig, raw_rel: &str, full_tier: bool) -> Result<String> {
+    let (raw_dir, wiki_dir, schema_dir) = resolved_triple(cfg)?;
+    let raw_dir = raw_dir.canonicalize().unwrap_or(raw_dir);
+    let wiki_dir = wiki_dir.canonicalize().unwrap_or(wiki_dir);
+    let schema_dir = schema_dir.canonicalize().unwrap_or(schema_dir);
+    wiki::ensure_wiki_layout(&wiki_dir)?;
+
+    let raw_path = raw_dir.join(raw_rel);
+    let raw_bytes = std::fs::read(&raw_path)
+        .with_context(|| format!("read raw {}", raw_path.display()))?;
+    let raw_text = String::from_utf8_lossy(&raw_bytes);
+    let (excerpt, truncated) = if raw_text.len() > PROMPT_PACK_MAX_RAW_BYTES {
+        (
+            raw_text.chars().take(PROMPT_PACK_MAX_RAW_BYTES).collect::<String>(),
+            true,
+        )
+    } else {
+        (raw_text.into_owned(), false)
+    };
+
+    let claude = wiki::read_optional(&wiki::schema_paths(&schema_dir).0, 500_000);
+    let llm_wiki = wiki::read_optional(&wiki::schema_paths(&schema_dir).1, 500_000);
+    let index_excerpt = wiki::read_optional(&wiki_dir.join("index.md"), 12_000);
+    let glossary_excerpt = wiki::read_optional(&wiki_dir.join("glossary.md"), 8000);
+
+    let tier_hint = if full_tier {
+        "Full tier: also propose glossary_patch with any important new terms (markdown bullets)."
+    } else {
+        "Lite tier: glossary_patch only if a few critical terms are obvious."
+    };
+    let track_id = track_from_rel(raw_rel);
+    let track_hint = track_id
+        .as_ref()
+        .map(|t| format!(
+            "Track namespace: {t}. Keep this identity explicit in title/body and include tag track:{t}."
+        ))
+        .unwrap_or_else(|| {
+            "Track namespace: unknown/inbox. Infer a concise domain tag when obvious.".into()
+        });
+
+    let json_keys = "You output ONLY valid JSON (no markdown fences, no commentary). Keys: slug (kebab-case filename stem), title, one_line_summary (short), body_markdown_b64 (REQUIRED: standard Base64 of UTF-8 for the wiki markdown body WITHOUT YAML frontmatter — include the ENTIRE article here: headings, bullet lists, ```mermaid``` blocks, ```yaml```/```code``` fences, Markdown tables, and inline code so JSON never contains raw fence or quote characters from the article), body_markdown (always use empty string \"\" — do not put article text here), tags (string array), glossary_patch (string; use \"\" if none).";
+
+    let trunc_note = if truncated {
+        "\n\n(NOTE: raw text was truncated in this pack for size; you may re-open `raw/"
+            .to_string()
+            + raw_rel
+            + "` in the vault for the full document.)\n"
+    } else {
+        String::new()
+    };
+
+    let pack = format!(
+        r#"# Cursor-assisted ingest — prompt pack
+
+Copy everything below the line into **Cursor Chat**. Paste the model's **single JSON object** response back into Second Brain Lite (Ingest → Cursor-assisted → Model JSON).
+
+---
+
+## Output contract (strict)
+
+{json_keys}
+
+## Tier
+
+{tier_hint}
+
+## Track hint
+
+{track_hint}
+
+## Schema context
+
+### CLAUDE.md (schema)
+
+{claude}
+
+### llm-wiki.md (pattern)
+
+{llm_wiki}
+
+### index.md (excerpt)
+
+{index_excerpt}
+
+### glossary.md (excerpt)
+
+{glossary_excerpt}
+
+## Raw document (saved in vault)
+
+**Path (relative to vault raw/):** `raw/{raw_rel}`
+
+### Raw text for ingest
+
+{excerpt}{trunc_note}
+"#,
+        json_keys = json_keys,
+        tier_hint = tier_hint,
+        track_hint = track_hint,
+        claude = claude,
+        llm_wiki = llm_wiki,
+        index_excerpt = index_excerpt,
+        glossary_excerpt = glossary_excerpt,
+        raw_rel = raw_rel,
+        excerpt = excerpt,
+        trunc_note = trunc_note,
+    );
+    Ok(pack)
+}
+
+/// Build ingest JSON for a wiki page body without calling an LLM (e.g. Cursor archive excerpt).
+pub fn stub_ingest_json_for_markdown_body(
+    slug: &str,
+    title: &str,
+    one_line_summary: &str,
+    body_markdown: &str,
+    tags: &[String],
+) -> String {
+    serde_json::json!({
+        "slug": slug,
+        "title": title,
+        "one_line_summary": one_line_summary,
+        "body_markdown": body_markdown,
+        "body_markdown_b64": serde_json::Value::Null,
+        "tags": tags,
+        "glossary_patch": "",
+    })
+    .to_string()
 }
 
 /// Maximum UTF-8 size for a single pasted ingest payload.
@@ -1155,7 +1431,13 @@ where
             continue;
         }
 
-        if let Err(e) = append_log(&wiki_dir, &parsed.title, &source_rel, &today) {
+        if let Err(e) = append_log(
+            &wiki_dir,
+            &parsed.title,
+            &source_rel,
+            &today,
+            Some("provider-ingest"),
+        ) {
             let detail = format!("log: {}", e);
             on_progress(IngestProgressPayload {
                 phase: "error".into(),

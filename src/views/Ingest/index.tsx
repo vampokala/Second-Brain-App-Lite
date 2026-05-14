@@ -4,12 +4,26 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { useIngest } from '@/hooks/useIngest'
+import { useIngest, formatIngestProgressLine } from '@/hooks/useIngest'
 import { ingestLlmSummary } from '@/lib/llm-display'
 import { cn } from '@/lib/utils'
-import type { AppConfig, IngestTrackMode, IngestUiHints, TrackInference } from '@/types'
+import type {
+  AppConfig,
+  ChatExcerpt,
+  CursorTranscriptFile,
+  CursorWorkspaceEntry,
+  FileIngestResult,
+  IngestCommitPreview,
+  IngestProgressPayload,
+  IngestTrackMode,
+  IngestUiHints,
+  PrepareCursorAssistResponse,
+  SessionFile,
+  TrackInference,
+} from '@/types'
 import { invoke } from '@tauri-apps/api/core'
-import { BrainCircuit, CheckCircle2, FileText, Loader2, SkipForward, XCircle } from 'lucide-react'
+import { listen } from '@tauri-apps/api/event'
+import { BrainCircuit, CheckCircle2, FileText, FolderOpen, Loader2, SkipForward, XCircle } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 type Banner = { kind: 'success' | 'error'; text: string } | null
@@ -21,7 +35,7 @@ function StatusIcon({ status }: { status: string }) {
 }
 
 export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; onBanner: (b: Banner) => void }) {
-  const { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack, cancelIngest } = useIngest()
+  const { busy, rows, setRows, logLines, setLogLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack, cancelIngest } = useIngest()
   const [fullTier, setFullTier] = useState(false)
   const [pasteTitle, setPasteTitle] = useState('')
   const [pasteBody, setPasteBody] = useState('')
@@ -37,6 +51,27 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
   const [ingestHints, setIngestHints] = useState<IngestUiHints | null>(null)
   /** Shown on this tab when ingest fails or returns per-file errors (banner alone is easy to miss). */
   const [ingestError, setIngestError] = useState<string | null>(null)
+
+  const [cursorAssistOpen, setCursorAssistOpen] = useState(false)
+  const [cursorRawRel, setCursorRawRel] = useState<string | null>(null)
+  const [cursorPromptPack, setCursorPromptPack] = useState('')
+  const [cursorModelJson, setCursorModelJson] = useState('')
+  const [cursorPreview, setCursorPreview] = useState<IngestCommitPreview | null>(null)
+  const [cursorAssistBusy, setCursorAssistBusy] = useState(false)
+
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const [hashFilter, setHashFilter] = useState('')
+  const [maxAgeDays, setMaxAgeDays] = useState('30')
+  const [vaultFilter, setVaultFilter] = useState('')
+  const [workspaces, setWorkspaces] = useState<CursorWorkspaceEntry[]>([])
+  const [wsSelected, setWsSelected] = useState('')
+  const [transcripts, setTranscripts] = useState<CursorTranscriptFile[]>([])
+  const [txSelected, setTxSelected] = useState('')
+  const [archiveExcerpt, setArchiveExcerpt] = useState<ChatExcerpt | null>(null)
+  const [destEnrich, setDestEnrich] = useState(true)
+  const [destWiki, setDestWiki] = useState(false)
+  const [destSession, setDestSession] = useState(false)
+  const [archiveBusy, setArchiveBusy] = useState(false)
 
   useEffect(() => {
     if (!cfg) return
@@ -174,6 +209,225 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
       const msg = String(e)
       setIngestError(msg)
       onBanner({ kind: 'error', text: msg })
+    }
+  }
+
+  const subscribeIngestProgress = async () =>
+    listen<IngestProgressPayload>('ingest-progress', (ev) => {
+      setLogLines((prev) => [...prev, formatIngestProgressLine(ev.payload)])
+    })
+
+  const handlePrepareCursorAssist = async () => {
+    if (!cfg) return
+    if (!pasteBody.trim()) {
+      onBanner({ kind: 'error', text: 'Enter content in Paste first (same as Save to raw & ingest).' })
+      setShowPaste(true)
+      return
+    }
+    if (!maybeWarnLowConfidence()) return
+    setIngestError(null)
+    setCursorAssistBusy(true)
+    setCursorPreview(null)
+    const unlisten = await subscribeIngestProgress()
+    try {
+      const res = await invoke<PrepareCursorAssistResponse>('prepare_cursor_assisted_ingest', {
+        cfg,
+        fullTier,
+        payload: {
+          content: pasteBody,
+          fileStem: pasteTitle.trim() || undefined,
+          trackId: resolvedTrackId,
+          autoDetectTrack: trackMode === 'auto',
+        },
+      })
+      setCursorRawRel(res.rawRel)
+      setCursorPromptPack(res.promptPack)
+      onBanner({ kind: 'success', text: `Saved raw/${res.rawRel}. Copy the prompt pack to Cursor Chat.` })
+    } catch (e) {
+      const msg = String(e)
+      setIngestError(msg)
+      onBanner({ kind: 'error', text: msg })
+    } finally {
+      unlisten()
+      setCursorAssistBusy(false)
+    }
+  }
+
+  const handlePreviewCursorCommit = async () => {
+    if (!cfg || !cursorRawRel || !cursorModelJson.trim()) return
+    setIngestError(null)
+    try {
+      const p = await invoke<IngestCommitPreview>('preview_cursor_assisted_commit_cmd', {
+        cfg,
+        rawRel: cursorRawRel,
+        pastedModelJson: cursorModelJson,
+      })
+      setCursorPreview(p)
+      onBanner({ kind: 'success', text: 'JSON valid — review preview below, then commit.' })
+    } catch (e) {
+      const msg = String(e)
+      setIngestError(msg)
+      setCursorPreview(null)
+      onBanner({ kind: 'error', text: msg })
+    }
+  }
+
+  const handleCommitCursorAssist = async () => {
+    if (!cfg || !cursorRawRel || !cursorModelJson.trim()) return
+    if (!cursorPreview) {
+      onBanner({ kind: 'error', text: 'Run “Validate JSON” first.' })
+      return
+    }
+    if (
+      !window.confirm(
+        `Commit to wiki/${cursorPreview.wikiSourceRel}?\n\nTitle: ${cursorPreview.title}\nTrack: ${cursorPreview.trackId ?? 'inbox'}`,
+      )
+    ) {
+      return
+    }
+    setIngestError(null)
+    setCursorAssistBusy(true)
+    const unlisten = await subscribeIngestProgress()
+    try {
+      const r = await invoke<FileIngestResult>('commit_cursor_assisted_ingest_cmd', {
+        cfg,
+        rawRel: cursorRawRel,
+        pastedModelJson: cursorModelJson,
+      })
+      setRows([r])
+      onBanner({ kind: 'success', text: `Committed: wiki/${r.detail ?? ''}` })
+      setCursorModelJson('')
+      setCursorPreview(null)
+    } catch (e) {
+      const msg = String(e)
+      setIngestError(msg)
+      onBanner({ kind: 'error', text: msg })
+    } finally {
+      unlisten()
+      setCursorAssistBusy(false)
+    }
+  }
+
+  const handleDiscoverWorkspaces = async () => {
+    setArchiveBusy(true)
+    setArchiveExcerpt(null)
+    try {
+      const hasFilters = !!(hashFilter.trim() || maxAgeDays.trim() || vaultFilter.trim())
+      const query = hasFilters
+        ? {
+            hashContains: hashFilter.trim() || undefined,
+            maxAgeDays: (() => {
+              const t = maxAgeDays.trim()
+              if (!t) return undefined
+              const d = Number.parseInt(t, 10)
+              return Number.isFinite(d) && d > 0 ? d : undefined
+            })(),
+            vaultPathContains: vaultFilter.trim() || undefined,
+          }
+        : undefined
+      const list = await invoke<CursorWorkspaceEntry[]>('cursor_archive_discover_cmd', { query })
+      setWorkspaces(list)
+      if (!list.some((w) => w.absPath === wsSelected)) {
+        setWsSelected('')
+        setTranscripts([])
+        setTxSelected('')
+      }
+      onBanner({ kind: 'success', text: `Found ${list.length} Cursor workspace folder(s).` })
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    } finally {
+      setArchiveBusy(false)
+    }
+  }
+
+  const handleLoadTranscripts = async () => {
+    if (!wsSelected) return
+    setArchiveBusy(true)
+    setArchiveExcerpt(null)
+    try {
+      const list = await invoke<CursorTranscriptFile[]>('cursor_archive_list_cmd', { workspaceAbs: wsSelected })
+      setTranscripts(list)
+      setTxSelected('')
+      onBanner({ kind: 'success', text: `${list.length} .jsonl file(s) under workspace.` })
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    } finally {
+      setArchiveBusy(false)
+    }
+  }
+
+  const handlePreviewArchiveExcerpt = async () => {
+    if (!txSelected) return
+    setArchiveBusy(true)
+    try {
+      const ex = await invoke<ChatExcerpt>('cursor_archive_preview_cmd', { path: txSelected, maxChars: 80_000 })
+      setArchiveExcerpt(ex)
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+      setArchiveExcerpt(null)
+    } finally {
+      setArchiveBusy(false)
+    }
+  }
+
+  const handleArchiveApplyDestinations = async () => {
+    if (!cfg || !txSelected) {
+      onBanner({ kind: 'error', text: 'Select a transcript file.' })
+      return
+    }
+    if (!destEnrich && !destWiki && !destSession) {
+      onBanner({ kind: 'error', text: 'Pick at least one destination.' })
+      return
+    }
+    const parts: string[] = []
+    if (destEnrich) parts.push('append excerpt to prompt pack')
+    if (destWiki) parts.push('wiki source via ingest JSON')
+    if (destSession) parts.push('new Lite chat session')
+    if (!window.confirm(`Apply: ${parts.join(', ')}?`)) return
+
+    setArchiveBusy(true)
+    const unlisten = destWiki ? await subscribeIngestProgress() : null
+    try {
+      if (destEnrich) {
+        const ex = archiveExcerpt ?? (await invoke<ChatExcerpt>('cursor_archive_preview_cmd', { path: txSelected, maxChars: 80_000 }))
+        setArchiveExcerpt(ex)
+        const block = `\n\n---\n\n## Archived Cursor excerpt (${ex.title})\n\nSource: \`${ex.sourcePath}\`\n\n${ex.messages.map((m) => `### ${m.role}\n\n${m.text}`).join('\n\n')}\n`
+        setCursorPromptPack((prev) => (prev ? prev + block : block))
+        setCursorAssistOpen(true)
+        setShowPaste(true)
+      }
+      if (destWiki) {
+        const r = await invoke<FileIngestResult>('cursor_archive_commit_excerpt_wiki_cmd', {
+          cfg,
+          transcriptPath: txSelected,
+          maxChars: 80_000,
+          trackId: resolvedTrackId,
+          titleStem: undefined,
+        })
+        setRows([r])
+        onBanner({ kind: 'success', text: `Wiki: ${r.detail ?? r.status}` })
+      }
+      if (destSession) {
+        const sess = await invoke<SessionFile>('cursor_archive_import_excerpt_session_cmd', {
+          transcriptPath: txSelected,
+          maxChars: 80_000,
+        })
+        onBanner({ kind: 'success', text: `Lite session: ${sess.title}` })
+      }
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
+    } finally {
+      unlisten?.()
+      setArchiveBusy(false)
+    }
+  }
+
+  const handleRevealTranscript = async () => {
+    if (!txSelected) return
+    try {
+      await invoke('cursor_archive_reveal_cmd', { path: txSelected })
+    } catch (e) {
+      onBanner({ kind: 'error', text: String(e) })
     }
   }
 
@@ -362,8 +616,220 @@ export default function IngestView({ cfg, onBanner }: { cfg: AppConfig | null; o
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader className="py-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <CardTitle className="text-base">Cursor-assisted ingest</CardTitle>
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={cursorAssistOpen}
+                onChange={(e) => setCursorAssistOpen(e.target.checked)}
+                className="rounded"
+              />
+              Show workflow
+            </label>
+          </div>
+          <p className="text-xs text-[var(--color-muted-foreground)] mt-1">
+            For environments where only Cursor-hosted models are allowed: save to <code className="bg-[var(--color-muted)] px-1 rounded">raw/</code>, copy a prompt pack into Cursor Chat, paste JSON back — no provider API call from this app.
+          </p>
+        </CardHeader>
+        {cursorAssistOpen && (
+          <CardContent className="pt-0 flex flex-col gap-3 border-t border-[var(--color-border)]">
+            <p className="text-xs text-[var(--color-muted-foreground)]">
+              1) Fill <strong>Paste</strong> above (track + content). 2) Generate pack. 3) Paste model JSON. 4) Validate, then commit.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handlePrepareCursorAssist}
+                disabled={busy || cursorAssistBusy || invalidTrackSelection || !pasteBody.trim()}
+              >
+                {cursorAssistBusy ? <Loader2 size={14} className="animate-spin mr-1.5" /> : null}
+                Save to raw &amp; generate prompt pack
+              </Button>
+              {cursorRawRel && (
+                <span className="text-xs font-mono text-[var(--color-muted-foreground)] self-center">
+                  raw/{cursorRawRel}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <Label>Prompt pack (copy to Cursor Chat)</Label>
+                {cursorPromptPack ? <CopyButton text={cursorPromptPack} label="Copy pack" /> : null}
+              </div>
+              <Textarea
+                value={cursorPromptPack}
+                onChange={(e) => setCursorPromptPack(e.target.value)}
+                placeholder="Generate a pack after saving raw…"
+                className="min-h-48 font-mono text-xs"
+                disabled={cursorAssistBusy}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label>Model response (JSON)</Label>
+              <Textarea
+                value={cursorModelJson}
+                onChange={(e) => {
+                  setCursorModelJson(e.target.value)
+                  setCursorPreview(null)
+                }}
+                placeholder='Paste a single JSON object with slug, title, one_line_summary, body_markdown_b64, …'
+                className="min-h-32 font-mono text-xs"
+              />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="secondary" onClick={handlePreviewCursorCommit} disabled={!cursorRawRel || !cursorModelJson.trim()}>
+                Validate JSON
+              </Button>
+              <Button
+                type="button"
+                onClick={handleCommitCursorAssist}
+                disabled={!cursorRawRel || !cursorModelJson.trim() || !cursorPreview || cursorAssistBusy}
+              >
+                Commit to wiki
+              </Button>
+            </div>
+            {cursorPreview && (
+              <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-muted)]/30 p-3 text-xs space-y-1">
+                <div><strong>Title:</strong> {cursorPreview.title}</div>
+                <div><strong>Slug:</strong> {cursorPreview.slug}</div>
+                <div><strong>Summary:</strong> {cursorPreview.oneLineSummary}</div>
+                <div><strong>Wiki file:</strong> {cursorPreview.wikiSourceRel}</div>
+                <div><strong>Tags:</strong> {cursorPreview.tags.join(', ') || '—'}</div>
+                <div><strong>Track:</strong> {cursorPreview.trackId ?? 'inbox'}</div>
+              </div>
+            )}
+          </CardContent>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader className="py-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <CardTitle className="text-base">Import Cursor chat archive</CardTitle>
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={archiveOpen}
+                onChange={(e) => setArchiveOpen(e.target.checked)}
+                className="rounded"
+              />
+              Show local transcripts
+            </label>
+          </div>
+          <p className="text-xs text-[var(--color-muted-foreground)] mt-1">
+            Reads local Cursor <code className="bg-[var(--color-muted)] px-1 rounded">workspaceStorage</code> for <code className="bg-[var(--color-muted)] px-1 rounded">*.jsonl</code> only. <code className="bg-[var(--color-muted)] px-1 rounded">state.vscdb</code> is not parsed yet. Use &quot;Reveal in Finder&quot; for external tools.
+          </p>
+        </CardHeader>
+        {archiveOpen && (
+          <CardContent className="pt-0 flex flex-col gap-3 border-t border-[var(--color-border)]">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs">Hash contains</Label>
+                <Input value={hashFilter} onChange={(e) => setHashFilter(e.target.value)} placeholder="workspace hash" className="h-8 text-xs" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs">Max age (days)</Label>
+                <Input value={maxAgeDays} onChange={(e) => setMaxAgeDays(e.target.value)} placeholder="30" className="h-8 text-xs" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs">Vault path contains</Label>
+                <Input value={vaultFilter} onChange={(e) => setVaultFilter(e.target.value)} placeholder="folder URI substring" className="h-8 text-xs" />
+              </div>
+            </div>
+            <Button type="button" variant="secondary" size="sm" onClick={handleDiscoverWorkspaces} disabled={archiveBusy}>
+              {archiveBusy ? <Loader2 size={14} className="animate-spin mr-1.5" /> : null}
+              Discover workspaces
+            </Button>
+            <div className="flex flex-col gap-1.5">
+              <Label>Workspace</Label>
+              <select
+                className="h-9 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background)] px-2 text-sm"
+                value={wsSelected}
+                onChange={(e) => {
+                  setWsSelected(e.target.value)
+                  setTranscripts([])
+                  setTxSelected('')
+                  setArchiveExcerpt(null)
+                }}
+              >
+                <option value="">Select…</option>
+                {workspaces.map((w) => (
+                  <option key={w.absPath} value={w.absPath}>
+                    {w.projectSlug}
+                    {w.folderHint ? ` — ${w.folderHint.slice(0, 80)}` : ''}
+                    {w.hasStateVscdb ? ' [vscdb]' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="secondary" size="sm" onClick={handleLoadTranscripts} disabled={archiveBusy || !wsSelected}>
+                List .jsonl transcripts
+              </Button>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label>Transcript file</Label>
+              <select
+                className="h-9 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background)] px-2 text-sm font-mono text-xs"
+                value={txSelected}
+                onChange={(e) => {
+                  setTxSelected(e.target.value)
+                  setArchiveExcerpt(null)
+                }}
+              >
+                <option value="">Select…</option>
+                {transcripts.map((t) => (
+                  <option key={t.absPath} value={t.absPath}>
+                    {t.name} ({Math.round(t.sizeBytes / 1024)} KiB)
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={handlePreviewArchiveExcerpt} disabled={archiveBusy || !txSelected}>
+                Preview excerpt
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={handleRevealTranscript} disabled={!txSelected}>
+                <FolderOpen size={14} className="mr-1.5 inline" />
+                Reveal in OS
+              </Button>
+              {txSelected ? <CopyButton text={txSelected} label="Copy path" /> : null}
+            </div>
+            <div className="flex flex-col gap-2 border border-[var(--color-border)] rounded-md p-2">
+              <span className="text-xs font-medium text-[var(--color-foreground)]">Destinations (multi)</span>
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={destEnrich} onChange={(e) => setDestEnrich(e.target.checked)} />
+                Append excerpt to Cursor-assisted prompt pack
+              </label>
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={destWiki} onChange={(e) => setDestWiki(e.target.checked)} />
+                Stage wiki page (stub ingest JSON, track from ingest controls)
+              </label>
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={destSession} onChange={(e) => setDestSession(e.target.checked)} />
+                Import as Lite chat session
+              </label>
+            </div>
+            <Button type="button" onClick={handleArchiveApplyDestinations} disabled={archiveBusy || !txSelected}>
+              {archiveBusy ? <Loader2 size={14} className="animate-spin mr-1.5" /> : null}
+              Apply selected destinations
+            </Button>
+            {archiveExcerpt && (
+              <div className="text-xs border border-[var(--color-border)] rounded-md p-2 max-h-40 overflow-y-auto">
+                <strong>{archiveExcerpt.title}</strong> — {archiveExcerpt.messages.length} message(s)
+                {archiveExcerpt.truncated ? ' (truncated)' : ''}
+              </div>
+            )}
+          </CardContent>
+        )}
+      </Card>
+
       {/* Progress */}
-      {(busy || logLines.length > 0) && (
+      {(busy || cursorAssistBusy || archiveBusy || logLines.length > 0) && (
         <Card>
           <CardHeader className="py-2.5">
             <div className="flex items-center justify-between">

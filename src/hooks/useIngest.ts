@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { useCallback, useState } from 'react'
 import type { AppConfig, FileIngestResult, IngestProgressPayload, TrackInference } from '@/types'
 
-function formatLine(p: IngestProgressPayload): string {
+export function formatIngestProgressLine(p: IngestProgressPayload): string {
   const step = p.current != null && p.total != null ? `[${p.current}/${p.total}] ` : ''
   const path = p.relativePath ? `${p.relativePath} · ` : ''
   return `${step}${path}${p.phase}: ${p.message}`
@@ -18,7 +18,7 @@ export function useIngest() {
 
   const subscribe = async () =>
     listen<IngestProgressPayload>('ingest-progress', (ev) => {
-      setLogLines((prev) => [...prev, formatLine(ev.payload)])
+      setLogLines((prev) => [...prev, formatIngestProgressLine(ev.payload)])
     })
 
   const runIngest = async (cfg: AppConfig, fullTier: boolean, trackId?: string): Promise<FileIngestResult[]> => {
@@ -121,5 +121,5 @@ export function useIngest() {
     [],
   )
 
-  return { busy, rows, logLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack, cancelIngest }
+  return { busy, rows, setRows, logLines, setLogLines, runIngest, pasteAndIngest, ingestUrl, listTracks, inferTrack, cancelIngest }
 }
